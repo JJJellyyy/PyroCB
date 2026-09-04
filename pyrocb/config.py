@@ -72,6 +72,9 @@ ACTIVE_HEADLINE_H   = 12
 # ignitions), which is the analysis population; False -> every tracked fire, which is
 # ~170k polygons and a 27 MB file.
 MAP_ONLY_PCB_FIRES  = True
+# If fewer than this fraction of fires reproduce their n_pixels from the NFP id join,
+# the year's NFP labels are stale (2021) and pixels are re-attributed by geometry.
+NFP_ID_MIN_MATCH    = 0.95
 STALE_OBS_H         = 14.0    # no overpass within this of onset -> qc_stale_obs
 
 # Local-solar boundaries of the AM/PM overpass groups, measured from NFP datetime_utc.

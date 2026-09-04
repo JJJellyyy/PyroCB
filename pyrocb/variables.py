@@ -41,13 +41,8 @@ def ignition_vars(year: int, ev: pd.DataFrame) -> pd.DataFrame:
     size of the merge complex - and the variable that tells you whether the concentric
     band model applies to this fire at all.
     """
-    ign = io.read_ignitions(year)
-    lon = ign.geometry.centroid.to_crs(C.WGS84).x.values
-    d = pd.to_datetime(dict(year=ign["tst_year"], month=ign["tst_month"],
-                            day=ign["tst_day"]), errors="coerce")
-    h = ign["tst_ampm"].map(T.NOMINAL_LOCAL_H).fillna(7.0).values
-    ign = ign.assign(ign_t=d + pd.to_timedelta(h - T.norm_lon(lon) / 15.0, unit="h"),
-                     ign_halfday=ign["tst_ampm"])
+    # ign_t / ign_index now live on read_ignitions so the map and this table agree.
+    ign = io.read_ignitions(year).assign(ign_halfday=lambda d: d["tst_ampm"])
     by = {k: v for k, v in ign.groupby("mergid")}
 
     rows = []
@@ -163,12 +158,21 @@ def build_events(year: int, matches: pd.DataFrame, band_ev: pd.DataFrame,
                     fire_vars(year, ev).reset_index(drop=True)], axis=1)
     ev = ev.sort_values("datetime").reset_index(drop=True)
 
-    # The strongest end-to-end check we have on the mergid join chain.
+    # The strongest end-to-end check on the mergid join chain: NFP pixels summed per
+    # fire must equal the final perimeter's n_pixels. Asserted for years whose NFP ids
+    # are sound; for a repaired year (2021 ships lon/lat coordinates and stale ids, so
+    # pixels are re-attributed by geometry) exactness is not recoverable, so it becomes
+    # a per-row QC flag instead of a hard failure.
+    repaired = io.nfp_repaired(year)
+    ev["qc_nfp_repaired"] = repaired
     ok = ev["n_pixels_total"].notna() & ev["fire_n_pixels"].notna()
-    if ok.any():
-        bad = int((ev.loc[ok, "n_pixels_total"] != ev.loc[ok, "fire_n_pixels"]).sum())
+    bad = int((ev.loc[ok, "n_pixels_total"] != ev.loc[ok, "fire_n_pixels"]).sum()) if ok.any() else 0
+    ev["qc_nfp_pixel_exact"] = ev["n_pixels_total"] == ev["fire_n_pixels"]
+    if not repaired:
         assert bad == 0, f"{year}: NFP pixel total != final n_pixels for {bad} events"
     if verbose:
-        print(f"  {year}: {len(ev)} event rows x {ev.shape[1]} columns "
-              f"(NFP/final pixel identity verified)", flush=True)
+        note = ("NFP ids REPAIRED by geometry - NFP-derived columns are approximate; "
+                f"{len(ev) - bad}/{len(ev)} events still exact"
+                if repaired else "NFP/final pixel identity verified")
+        print(f"  {year}: {len(ev)} event rows x {ev.shape[1]} columns  ({note})", flush=True)
     return ev

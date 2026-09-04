@@ -36,6 +36,13 @@ snap_farea	km2	Fire area in the snapshot at match_step (cumulative burned, not a
 snap_flinelen	km	Active fire-line length at match_step	snapshot
 snap_meanFRP	W/m2	Area-normalised mean FRP at match_step	snapshot
 snap_n_components	-	Snapshot rows sharing this mergid (un-executed merge components)	snapshot
+active_area_km2_12h	km2	ACTIVE BURN AREA: union of VIIRS pixel footprints within +/-12 h of onset. The sampling geometry for land cover / ERA5	NFP
+active_area_km2_6h / _24h	km2	Same at +/-6 h and +/-24 h, for sensitivity	NFP
+active_n_pixels_12h	-	Detections inside that window	NFP
+active_n_obs_12h	-	Distinct overpass times in the window; 1 means a single look	NFP
+active_n_before_onset_12h	-	Of those detections, how many precede onset	NFP
+active_frp_p95_12h	MW	95th percentile FRP of the active-burn pixels	NFP
+match_fwd_steps	-	Overpasses searched AHEAD to find a fire that blew up before it was first observed; 0 normally	derived
 fire_farea_km2	km2	Season-final fire area	final perimeter
 fire_duration_days	d	Fire duration	final perimeter
 fire_lcc_final	-	Dominant land cover of the final perimeter	final perimeter

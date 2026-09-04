@@ -307,6 +307,14 @@ def pack(gj):
     raw = json.dumps(gj, separators=(",", ":")).encode()
     return base64.b64encode(gzip.compress(raw, 9)).decode(), len(raw), len(gzip.compress(raw, 9))
 
+def smooth_for_map(gser, close_m, simp_m):
+    # Map-only geometry reduction. The active-burn polygon is a union of thousands of
+    # individual VIIRS pixel rectangles (~125 kB of coordinates each). The map only
+    # needs to show roughly where; the exact sampling geometry lives in the GeoPackage.
+    # Close the pixel lattice into solid blobs (buffer +/- close_m), then simplify.
+    g = gser.buffer(close_m, join_style="mitre").buffer(-close_m, join_style="mitre")
+    return g.simplify(simp_m, preserve_topology=True)
+
 payloads, doys = {}, []
 for y in YEARS:
     per = io.read_final(y, metric=False)
@@ -316,12 +324,14 @@ for y in YEARS:
     per["doy"] = doy_of(per)
     per_out = per[["mergid", "farea", "duration", "n_pixels", "lcc_final", "doy", "geometry"]] \
         .rename(columns={"farea": "farea_km2", "duration": "duration_days"}).round({"farea_km2": 3})
+    doys.append(per_out[["doy", "farea_km2"]].dropna())   # feeds the DOY-window fit below
 
     ign = io.read_ignitions(y).to_crs(C.WGS84)
     ign["doy"] = doy_of(ign)
+    ign["n_ign_total"] = ign.groupby("mergid")["mergid"].transform("size")
     ign["geometry"] = ign.geometry.representative_point()
-    ign_out = ign[["mergid", "ftype", "n_pixels", "farea", "doy", "geometry"]] \
-        .rename(columns={"farea": "farea_km2"})
+    ign_out = ign[["mergid", "ign_index", "n_ign_total", "ftype", "n_pixels",
+                   "farea", "doy", "geometry"]].rename(columns={"farea": "farea_km2"})
 
     p = pcb_all[pcb_all.year == y]
     ev_y = events[events.year == y] if len(events) else pd.DataFrame()
@@ -344,6 +354,12 @@ for y in YEARS:
     per_out["pcb_linked"] = per_out["mergid"].isin(linked)
     ign_out["pcb_linked"] = ign_out["mergid"].isin(linked)   # mergid, NOT fireid
 
+    if C.MAP_ONLY_PCB_FIRES:
+        # Ship only the analysis population. Essential now ignitions are DOM star
+        # markers - 180k SVG icons would lock the browser; ~1.5k is nothing.
+        per_out = per_out[per_out.pcb_linked].copy()
+        ign_out = ign_out[ign_out.pcb_linked].copy()
+
     b64 = {}
     b64["per"], _, gp = pack(json.loads(per_out.to_json(drop_id=True)))
     b64["ign"], _, gi = pack(json.loads(ign_out.to_json(drop_id=True)))
@@ -352,7 +368,7 @@ for y in YEARS:
     bg = band_geom.get(y)
     if bg is not None and len(bg):
         bg = bg.copy()
-        bg["geometry"] = bg.geometry.simplify(C.BAND_SIMPLIFY_M, preserve_topology=True)
+        bg["geometry"] = smooth_for_map(bg.geometry, 60.0, C.BAND_SIMPLIFY_M * 3)
         bg = gpd.GeoDataFrame(bg, geometry="geometry", crs=C.METRIC_CRS).to_crs(C.WGS84)
         bg = bg[~bg.geometry.is_empty & bg.geometry.notna()]
         bg["doy"] = pd.to_numeric(bg["step_hi"].str[4:8].str.slice(0, 2), errors="coerce")
@@ -365,7 +381,8 @@ for y in YEARS:
     ag = active_geom.get(y)
     if ag is not None and len(ag):
         ag = ag[ag.window_h == C.ACTIVE_HEADLINE_H].copy()
-        ag["geometry"] = ag.geometry.simplify(C.BAND_SIMPLIFY_M, preserve_topology=True)
+        # +/- 200 m closes the ~375 m pixel lattice into solid blobs before simplifying.
+        ag["geometry"] = smooth_for_map(ag.geometry, 200.0, 150.0)
         ag = gpd.GeoDataFrame(ag, geometry="geometry", crs=C.METRIC_CRS).to_crs(C.WGS84)
         ag = ag[~ag.geometry.is_empty & ag.geometry.notna()]
         ag["doy"] = pd.to_datetime(ag["datetime"]).dt.dayofyear
@@ -454,6 +471,10 @@ HTML = """<!DOCTYPE html>
   #barlab{display:flex;justify-content:space-between;color:#666;font-size:10px}
   .pcblbl{font:700 10px system-ui;color:#fff;text-align:center;line-height:15px;
           text-shadow:0 0 2px #000,0 0 2px #000}
+  .ignstar{position:relative}
+  .ignstar svg{display:block}
+  .ignstar span{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+     font:700 8px system-ui;color:#fff;text-shadow:0 0 2px #000,0 0 2px #000;pointer-events:none}
   .leaflet-popup-content{font:12px/1.45 system-ui,sans-serif;max-height:340px;overflow:auto}
   #busy{position:absolute;z-index:9999;top:12px;left:50%;transform:translateX(-50%);
         background:#222;color:#fff;padding:6px 14px;border-radius:14px;font:12px system-ui;display:none}
@@ -493,6 +514,16 @@ function lighten(hex, L){               // push a colour toward white / black
 let MODE = "year";
 const hueOf = (y,f) => MODE==="year" ? YCOL[y] : doyColor(f.properties.doy);
 
+// 5-point star, black outline, hue fill, ignition number centred on it.
+const STAR = "M10,1 L12.12,7.09 L18.56,7.22 L13.42,11.11 L15.29,17.28 "
+           + "L10,13.6 L4.71,17.28 L6.58,11.11 L1.44,7.22 L7.88,7.09 Z";
+function starIcon(hue, n){
+  return L.divIcon({className:"", iconSize:[20,20], iconAnchor:[10,10], html:
+    `<div class="ignstar"><svg width="20" height="20" viewBox="0 0 20 20">`
+    + `<path d="${STAR}" fill="${hue}" stroke="#111" stroke-width="1.4"`
+    + ` stroke-linejoin="round"/></svg><span>${n==null?"":n}</span></div>`});
+}
+
 // ---- map ------------------------------------------------------------------
 const map = L.map("map").setView([62,-105], 3);
 L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
@@ -502,6 +533,7 @@ const PANES = ["per","act","bnd","ign","pcb","orp"];
 const R = {};
 PANES.forEach((k,i)=>{ map.createPane(k); map.getPane(k).style.zIndex = 410+i*10;
                        R[k] = L.canvas({pane:k}); });
+map.createPane("ignlbl"); map.getPane("ignlbl").style.zIndex = 445;   // stars: above bands, below pyroCb
 map.createPane("lbl"); map.getPane("lbl").style.zIndex = 470;
 
 const ALL = ["per","perL","act","bnd","ign","ignL","pcb","pcbC","orp"];
@@ -522,11 +554,13 @@ function buildLayers(y, gj){
         ["Linked to a pyroCb",p.pcb_linked?"yes":"no"]])}</table>`);}
   });
   const ignOpts = f => ({
-    pane:"ign", renderer:R.ign, filter:f,
-    pointToLayer:(ft,ll)=>L.circleMarker(ll,{pane:"ign",renderer:R.ign,radius:2.5,
-      color:hueOf(y,ft),weight:1,fillColor:hueOf(y,ft),fillOpacity:.75}),
+    pane:"ignlbl", filter:f,
+    pointToLayer:(ft,ll)=>L.marker(ll,{pane:"ignlbl", icon:starIcon(hueOf(y,ft),
+      ft.properties.ign_index)}),
     onEachFeature:(ft,l)=>{const p=ft.properties;
-      l.bindPopup(`<b>Ignition (fire #${esc(p.mergid)})</b> ${y}<table>${rows([
+      l.bindPopup(`<b>Ignition ${esc(p.ign_index)} of ${esc(p.n_ign_total)}</b>`
+        +` &middot; fire #${esc(p.mergid)} &middot; ${y}<table>${rows([
+        ["Order within fire",p.ign_index+" of "+p.n_ign_total+" (by ignition time)"],
         ["Day of year",p.doy],["Fuel",p.ftype],["Area (km²)",p.farea_km2],
         ["VIIRS pixels",p.n_pixels]])}</table>`);}
   });
@@ -666,7 +700,10 @@ function recolour(){
     const c = cache[y];
     ["per","perL"].forEach(k=>c[k].setStyle(ft=>({color:hueOf(y,ft),fillColor:hueOf(y,ft),
       weight:1, fillOpacity:(ft.properties.farea_km2||0)>100?0.55:0.3})));
-    ["ign","ignL"].forEach(k=>c[k].setStyle(ft=>({color:hueOf(y,ft),fillColor:hueOf(y,ft)})));
+    ["ign","ignL"].forEach(k=>c[k].eachLayer(l=>{
+      const el=l.getElement&&l.getElement(), pth=el&&el.querySelector("path");
+      if (pth) pth.setAttribute("fill", hueOf(y,l.feature));
+    }));
     ["pcb","pcbC"].forEach(k=>c[k].eachLayer(l=>{
       if (l.setStyle) l.setStyle({fillColor:hueOf(y,l.feature)});
       else if (l.getElement && l.getElement()) l.getElement().firstChild.style.background = hueOf(y,l.feature);
@@ -728,7 +765,9 @@ legend.addTo(map);
 function drawLegend(){
   if (!legendDiv) return;
   const common = `<div class="row"><i class="sq" style="background:#888"></i>Fire perimeter</div>
-    <div class="row"><i style="background:#888"></i>Ignition</div>
+    <div class="row"><svg width="15" height="15" viewBox="0 0 20 20" style="flex:none">
+      <path d="${STAR}" fill="#888" stroke="#111" stroke-width="1.4" stroke-linejoin="round"/></svg>
+      Ignition (labelled with its order within the fire)</div>
     <div class="row"><i style="background:#888;border:1.5px solid #111"></i>pyroCb (labelled with its # on the fire)</div>
     <div class="row"><i style="border:2px solid #e11;background:none"></i>unmatched pyroCb</div>
     <div class="row"><i class="sq" style="border:2px solid #00e5ff;background:rgba(0,229,255,.18)"></i>active burn at onset (&plusmn;12 h)</div>
@@ -786,5 +825,22 @@ nb["metadata"] = {
     "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
     "language_info": {"name": "python"},
 }
+
+# Guard: every code cell must parse. A `\"\"\"` docstring written inside a
+# code(r\"\"\"...\"\"\") block silently terminates the cell early and truncates the
+# notebook - it has bitten us twice (ymd, smooth_for_map). Catch it here, at
+# generation time, rather than discovering it as a stale notebook three runs later.
+import ast as _ast
+for _i, _c in enumerate(cells):
+    if _c["cell_type"] != "code":
+        continue
+    try:
+        _ast.parse(_c["source"])
+    except SyntaxError as _e:
+        raise SystemExit(
+            f"code cell {_i} does not parse: {_e}\n"
+            f"  (a triple-quoted string inside a code(r\"\"\"...\"\"\") block ends the cell -\n"
+            f"   use # comments instead)\n---\n{_c['source'][:400]}") from None
+
 nbf.write(nb, "Data exploration.ipynb")
-print("wrote Data exploration.ipynb  (%d cells)" % len(cells))
+print("wrote Data exploration.ipynb  (%d cells, all parse)" % len(cells))

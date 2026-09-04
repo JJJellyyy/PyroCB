@@ -146,7 +146,31 @@ as a growth episode of known duration.
 
 ### D-19 — Lazy per-year decompression in the map
 Each year's payload is gzip+base64 embedded and unpacked only when the year is switched on. That
-is what lets a 27 MB file carrying ~170 k polygons open quickly.
+is what lets a 10 MB file open quickly.
+
+### D-24 — The map ships only the pyroCb analysis population
+`MAP_ONLY_PCB_FIRES` pre-filters the payload to fires credited with a pyroCb and their ignitions
+(~1.5 k ignitions across 11 years), not every tracked fire (~170 k). Forced by the move to DOM
+star markers for ignitions — 170 k `<svg>` icons lock the browser; the background fire population
+was never the point of this map anyway.
+**Rejected:** keeping the full background and only styling the pyroCb fires — fine for canvas
+dots, impossible for labelled markers.
+
+### D-25 — Ignitions are numbered stars; the number is order within the merge complex
+`ign_index` is the ignition's 1-based chronological rank within its `mergid` (ties on `fireid`),
+deliberately parallel to `pcb_index`. For a merge complex the stars then read 1…N in the order
+the complex assembled, making visible the structure that `n_ign_total` / `ign_merge_span_days`
+only summarise. Defined once in `io.read_ignitions` (with `ign_t`) so the map and the attribute
+table cannot disagree.
+**Rejected:** numbering by `fireid` (an opaque global id, not meaningful per fire); labelling
+only multi-ignition complexes (inconsistent with how every pyroCb is labelled).
+
+### D-26 — Smooth map geometry, keep full resolution in the GeoPackage
+The active-burn polygon is a union of thousands of 375 m VIIRS pixel rectangles — ~125 kB of
+coordinates each, 14 MB for one year. `smooth_for_map` closes the lattice (`buffer ±200 m`) into
+solid blobs before simplifying to 150 m; bands get `buffer ±60 m` + 150 m. The map only needs to
+show *roughly where*; the exact sampling geometry — what land-cover fractions and ERA5 are
+computed against — is untouched in `pyrocb_active_areas.gpkg`. Cut the map 26 MB → 10 MB.
 
 ### D-20 — Analysis lives in a package, not in notebook string literals
 `make_notebook.py` emits the notebook; the logic sits in `pyrocb/` so it can be imported, tested,
@@ -156,6 +180,15 @@ linted and profiled. The notebook narrates and calls it.
 Keyed on `CODE_VERSION` + a hash of the *relevant* config subset + input mtimes, so changing an
 unrelated constant does not invalidate a stage. Every stage is per-year and independent, so
 widening `SNAPSHOT_YEARS` reuses what is already computed. Warm reruns: 0.3 s.
+
+### D-23 — Validate the NFP id join per year; repair by geometry, flag, never fake
+The `n_pixels` identity is checked for every year rather than assumed. Below
+`NFP_ID_MIN_MATCH` (0.95) the year's labels are treated as stale and pixels are re-attributed by
+point-in-polygon against the final perimeters (2021 only — see F11). The result is flagged with
+`qc_nfp_repaired` / `qc_nfp_pixel_exact` rather than being presented as exact, and the hard
+assertion still runs for the sound years.
+**Rejected:** relaxing the assertion globally, which would have hidden the defect; and dropping
+2021, which discards 63 pyroCb events over a real fire season.
 
 ---
 

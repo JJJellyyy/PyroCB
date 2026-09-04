@@ -7,18 +7,86 @@ Rationale for each choice lives in [DECISIONS.md](DECISIONS.md); data discoverie
 
 ---
 
-## v0.5 — 2026-09-04 — version control, forward-match fix
+## v0.7 — 2026-09-04 — all-year map lands, ignition stars, export & build fixes
+
+The v0.6 all-years run computed every stage but **never produced a working map or the
+GeoPackage** — three defects in the last mile, now fixed.
 
 ### Fixed
-* **Ignition-day blow-ups were unmatched.** A fire that ignites and blows up inside the ~10 h
-  nightly observation gap is first seen by the *next* overpass, so it exists in no snapshot at or
-  before onset. Matching now searches up to `MATCH_FORWARD_STEPS` (2) overpasses ahead
-  (`inside_newfire` / `nearest_newfire`, with `match_fwd_steps`). Type case `2023-R90877`
-  (`PCB_2023_0625_0000`) now matches `mergid 11918` at 5.24 km instead of failing at 86 km — the
-  fire's first detection came 10.3 h *after* the pyroCb, already carrying 117 pixels. See F4.
-  2023 unmatched: 40 → 38.
-  Scoped to matching only; the pre-band still uses the last observation strictly before onset, so
-  such events correctly keep `band0_undefined` / `area_pre = 0`.
+* **Map generation crashed before writing HTML.** The DOY-colour window is fitted over a
+  `doys` list that the payload loop never appended to → `pd.concat([])` →
+  `ValueError: No objects to concatenate`. Every prior "all years" map on disk was the
+  **stale 2023-only build** left behind by this crash — which is why bands and numbered
+  pyroCb only showed for 2023. Now populated in the loop; the map carries all of 2013–2023.
+* **`pyrocb_active_areas.gpkg` was never written.** `pipeline.export()` took an `active`
+  argument and ignored it. Now writes the `active_burn` layer (1,188 rows = 396 events × 3
+  windows; empty-window rows kept with null geometry). This is the sampling geometry for the
+  30 m land-cover / ERA5 work, so it not existing was the real blocker.
+* **`make_notebook.py` shipped a truncated notebook twice.** A `"""` docstring written
+  inside a `code(r"""…""")` block ends the block early; the generator then wrote a short
+  notebook and `_nb_run.py` was extracted from it, so edits silently didn't take. Added an
+  `ast.parse` guard over every code cell at generation time — it now aborts loudly instead.
+
+### Added
+* **Ignitions are numbered stars.** Black-outlined 5-point SVG stars (hue = active colour
+  mode) in a new `ignlbl` DOM pane, replacing the canvas dots, each labelled with
+  **`ign_index`** — the ignition's chronological rank within its merge complex (`mergid`),
+  so a 40-ignition complex like `mergid 7783` reads 1…40 in assembly order. `ign_t` /
+  `ign_index` are defined once in `io.read_ignitions` and shared with `variables`.
+
+### Changed
+* **`MAP_ONLY_PCB_FIRES` is now actually applied** to the payload (it only flagged rows
+  before). Essential with DOM star markers — 180 k SVG icons would lock the browser; the
+  analysis population is ~1.5 k. Non-pyroCb fires and their ignitions no longer shipped.
+* **Map geometry smoothed for size.** `smooth_for_map` closes the VIIRS pixel lattice
+  (`buffer ±`) before simplifying, so the active-burn polygons — a union of thousands of
+  375 m boxes, ~125 kB each — collapse to smooth blobs. **26 MB → 10 MB.** Full-resolution
+  geometry is untouched in `pyrocb_active_areas.gpkg`.
+
+---
+
+## v0.6 — 2026-09-04 — active burn area, all years, 2021 data repair
+
+### Added
+* **Active burn area at pyroCb onset** (`pyrocb/active.py`) — the polygon of ground actually
+  detected burning around each event, built by unioning every VIIRS detection's DS×DT footprint
+  over a **symmetric** ±6/12/24 h window. Symmetric because the ~10 h nightly blind window means
+  the run that fed the plume is usually first observed *after* onset (F3). Exported as
+  **`pyrocb_active_areas.gpkg`** (WGS84) so it drops straight into QGIS or `rasterstats` for the
+  30 m land-cover fractions and ERA5 sampling. Also folded into the event table as
+  `active_area_km2_{6,12,24}h` and friends.
+  2023 sanity: ±12 h median 92.8 km², i.e. 7.1% of the fire's final area (p90 39%).
+* `MAP_ONLY_PCB_FIRES` — the map now ships only fires credited with a pyroCb and their ignitions,
+  which is the analysis population, instead of ~170 k background polygons.
+* Active-burn layer on the map, drawn as a cyan outline over the growth bands.
+* NFP reader now carries `DS`/`DT` (pixel footprint dimensions).
+* Per-year NFP id validation (`NFP_ID_MIN_MATCH`) with geometric repair and the
+  `qc_nfp_repaired` / `qc_nfp_pixel_exact` flags.
+* Stable event schema across years (`_SCHEMA_DEFAULTS`), so per-year frames concatenate.
+
+### Fixed
+* **Ignition-day blow-ups were unmatched.** A fire that ignites and blows up inside the nightly
+  observation gap is first seen by the *next* overpass, so it exists in no snapshot at or before
+  onset. Matching now searches up to `MATCH_FORWARD_STEPS` (2) overpasses ahead. Type case
+  **`2023-R90877`** (`PCB_2023_0625_0000`): was unmatched with the nearest active fire 86 km away;
+  now matches `mergid 11918` at **5.24 km** — the same fire its 06-28 sibling matched. That fire's
+  first detection came **10.3 h after** the pyroCb already carrying 117 pixels, so it was plainly
+  burning at onset, just unseen. 2023 unmatched 40 → 38. See F4.
+* **The 2021 NFP files are from a different processing run** — caught by the standing `n_pixels`
+  assertion, which failed for 2021 and no other year. Two defects: coordinates ship as **lon/lat**
+  instead of EPSG:3571 metres (every other year is metres), and `mergid` comes from a **stale id
+  space** (18,931 ids vs the final product's 11,688). The pixel *total* agrees to 0.04%, so the
+  detections are all there and correctly located — only the labels are wrong. Now auto-detected
+  and reprojected, then re-attributed by point-in-polygon: 7.0% → **68.3%** of fires exact,
+  83.1% within ±2 pixels. 2021 is **flagged, not faked** — treat its NFP-derived columns
+  (`n_pixels_*`, `frp_*`, `active_*`) as approximate. See F11.
+
+### Changed
+* `SNAPSHOT_YEARS = None` — the heavy analysis now covers all of 2013–2023.
+
+---
+
+## v0.5 — 2026-09-04 — version control baseline
 
 ### Added
 * `CHANGELOG.md`, `DECISIONS.md`, `FINDINGS.md`.

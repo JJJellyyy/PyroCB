@@ -202,3 +202,36 @@ genuinely absent from the atlas. They cluster in two places:
 
 Dropping them biases the sample toward well-detected boreal forest fires. Report unmatched counts
 **with a regional breakdown**, never as a bare total.
+
+
+---
+
+## F11. The 2021 NFP files are from a different processing run
+
+Caught by the standing `n_pixels` assertion (F6), which failed for 2021 and no other year.
+Two independent defects, one root cause — the 2021 NFP was not re-issued after the season was
+reprocessed:
+
+**a) Coordinates are lon/lat, not EPSG:3571 metres.** 2021 `x` spans −179…180 and `y` 50.6…71.4;
+every other year spans ±4.5 million metres. The attribute table documents EPSG:3571 for all
+years, so this is only detectable from the magnitudes. `io._read_nfp_raw` now sniffs it
+(`|x| ≤ 180 and |y| ≤ 90`) and reprojects, setting `nfp_reprojected`.
+
+**b) `mergid` is from a stale id space.** 2021 NFP carries **18,931** distinct ids against the
+final product's 11,688, and `final.mergid` is *not* a subset of them — yet the pixel total agrees
+to 0.04% (1,652,778 vs 1,653,384). The detections are all present and correctly located; only
+the labels are wrong.
+
+**Repair:** since the perimeters are built from these pixels, re-attributing by point-in-polygon
+against the final perimeters recovers most of the mapping — 7.0% → **68.3%** of fires exact,
+**83.1% within ±2 pixels**, median difference 0. Not perfect: pixels on perimeter edges and in
+overlapping polygons cannot be resolved this way.
+
+**Treatment:** 2021 is flagged, not faked. `qc_nfp_repaired` marks every 2021 row and
+`qc_nfp_pixel_exact` marks the individual rows that still reconcile. The hard assertion still
+runs for the ten sound years. **Treat 2021 NFP-derived columns — the `n_pixels_*`, `frp_*` and
+`active_*` families — as approximate.**
+
+*Lesson worth keeping: the assertion earned its place. Without it, 2021 would have produced
+plausible-looking pixel counts and active-burn polygons that were silently attributed to the
+wrong fires.*

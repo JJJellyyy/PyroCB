@@ -164,10 +164,28 @@ def read_final(year: int, metric: bool = True) -> gpd.GeoDataFrame:
 @lru_cache(maxsize=16)
 def read_ignitions(year: int) -> gpd.GeoDataFrame:
     """Ignition footprints in METRIC_CRS. One row per `fireid`; `mergid` groups the
-    separately-ignited fires that later grew together (1,444 of 12,151 rows in 2023)."""
+    separately-ignited fires that later grew together (1,444 of 12,151 rows in 2023).
+
+    Adds two shared columns so the map and `variables.ignition_vars` agree:
+      ign_t      nominal ignition instant (tst_* half-day at the polygon's own
+                 centroid longitude -> local solar -> UTC)
+      ign_index  1-based chronological rank of the ignition within its `mergid`,
+                 ties (same half-day) broken on fireid. Its max == n_ign_total.
+    """
+    from . import timebins as T
+
     g = gpd.read_file(C.IGN_TPL.format(y=year))
     if g.crs is None or g.crs.to_epsg() != C.METRIC_CRS:
         g = g.to_crs(C.METRIC_CRS)
+
+    lon = g.geometry.representative_point().to_crs(C.WGS84).x.values
+    d = pd.to_datetime(dict(year=g["tst_year"], month=g["tst_month"], day=g["tst_day"]),
+                       errors="coerce")
+    h = g["tst_ampm"].map(T.NOMINAL_LOCAL_H).fillna(7.0).values
+    g["ign_t"] = d + pd.to_timedelta(h - T.norm_lon(lon) / 15.0, unit="h")
+    g["ign_index"] = (g.sort_values(["ign_t", "fireid"])
+                        .groupby("mergid").cumcount().add(1)
+                        .reindex(g.index))
     return g
 
 
@@ -177,8 +195,8 @@ def read_ignitions(year: int) -> gpd.GeoDataFrame:
 _NFP_COLS = ["mergid", "y", "x", "DS", "DT", "frp", "sat", "datetime_utc"]
 
 
-def read_nfp_year(year: int) -> pd.DataFrame:
-    """All new-fire-pixel detections for a year, thinned and cached.
+def _read_nfp_raw(year: int) -> pd.DataFrame:
+    """All new-fire-pixel detections for a year, thinned and cached, as-shipped.
 
     NFP is incremental (consecutive steps share no coordinates) and carries a real
     `datetime_utc`, which is what makes exact before/after splits possible.
@@ -203,9 +221,86 @@ def read_nfp_year(year: int) -> pd.DataFrame:
         out["mergid"] = out["mergid"].astype("int64")
         for c in ("frp", "DS", "DT"):
             out[c] = out[c].astype("float32")
+        # The attribute table says x/y are EPSG:3571 metres, and they are - except in
+        # 2021, which ships lon/lat. Detect it from the magnitudes rather than trusting
+        # the spec, and reproject so every year lands in the same frame.
+        if out["x"].abs().max() <= 180 and out["y"].abs().max() <= 90:
+            print(f"    NFP {year}: coordinates are lon/lat, not EPSG:{C.METRIC_CRS} "
+                  f"- reprojecting", flush=True)
+            g = gpd.GeoSeries(shapely.points(out["x"].to_numpy(float),
+                                             out["y"].to_numpy(float)),
+                              crs=C.WGS84).to_crs(C.METRIC_CRS)
+            out["x"], out["y"] = g.x.to_numpy(), g.y.to_numpy()
+            out["nfp_reprojected"] = True
+        else:
+            out["nfp_reprojected"] = False
         return out
 
     return C.cached("nfp", year, {"cols": _NFP_COLS}, files[:1] + files[-1:], build)
+
+
+def read_nfp_year(year: int) -> pd.DataFrame:
+    """NFP detections with `mergid` validated against the final perimeters.
+
+    The id join is checked, not assumed: if fewer than NFP_ID_MIN_MATCH of fires
+    reproduce their `n_pixels`, the year's labels are stale and pixels are
+    re-attributed by geometry instead. `nfp_repaired(year)` reports which happened.
+    """
+    files = sorted(glob.glob(os.path.join(C.NFP_DIR.format(y=year), "*_NFP.txt")))
+
+    def build():
+        raw = _read_nfp_raw(year)
+        if nfp_id_health(year) >= C.NFP_ID_MIN_MATCH:
+            raw = raw.copy()
+            raw["nfp_repaired"] = False
+            return raw
+        fixed = _repair_nfp_by_geometry(year, raw)
+        fixed["nfp_repaired"] = True
+        print(f"    NFP {year}: stale ids in the shipped files - re-attributed "
+              f"{len(fixed):,}/{len(raw):,} pixels by geometry", flush=True)
+        return fixed
+
+    return C.cached("nfpv", year, {"cols": _NFP_COLS, "min": C.NFP_ID_MIN_MATCH},
+                    files[:1] + files[-1:], build)
+
+
+def nfp_repaired(year: int) -> bool:
+    return bool(read_nfp_year(year)["nfp_repaired"].iloc[0])
+
+
+def nfp_id_health(year: int) -> float:
+    """Fraction of final fires whose NFP pixel count matches `n_pixels` exactly."""
+    nfp = _read_nfp_raw(year)
+    fin = read_final(year)
+    s = nfp.groupby("mergid").size()
+    j = fin[["mergid", "n_pixels"]].set_index("mergid").join(s.rename("nfp")).fillna(0)
+    return float((j["n_pixels"] == j["nfp"]).mean())
+
+
+def _repair_nfp_by_geometry(year: int, nfp: pd.DataFrame) -> pd.DataFrame:
+    """Re-attribute NFP pixels to fires spatially, ignoring the file's own `mergid`.
+
+    Needed for 2021, where the NFP files were not re-issued after the season was
+    reprocessed: they carry 18,931 distinct ids against the final product's 11,688, and
+    `final.mergid` is not even a subset of them - yet the pixel TOTAL agrees to 0.04%.
+    So the detections are all present and correctly located; only the labels are stale.
+
+    Since the perimeters are themselves built from these pixels, a point-in-polygon
+    assignment against the final perimeters recovers the intended mapping.
+    """
+    fin = read_final(year)
+    pts = shapely.points(nfp["x"].to_numpy(float), nfp["y"].to_numpy(float))
+    tree = shapely.STRtree(fin.geometry.values)
+    pi, gi = tree.query(pts, predicate="within")
+    out = nfp.copy()
+    out["mergid_file"] = out["mergid"]
+    out["mergid"] = pd.NA
+    out.iloc[pi, out.columns.get_loc("mergid")] = fin["mergid"].values[gi]
+    # a pixel landing in two overlapping perimeters keeps the first; drop unassigned
+    out = out[out["mergid"].notna()].copy()
+    out["mergid"] = out["mergid"].astype("int64")
+    out = out[~out.index.duplicated(keep="first")]
+    return out
 
 
 def nfp_obs_index(year: int) -> pd.DataFrame:

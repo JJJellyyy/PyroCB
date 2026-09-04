@@ -57,9 +57,20 @@ def events_cached(year: int, matches, band_ev) -> pd.DataFrame:
     return _denorm(df)
 
 
+_SCHEMA_DEFAULTS = {"match_fwd_steps": 0, "nearest_mergid": pd.NA,
+                    "qc_nfp_repaired": False, "qc_nfp_pixel_exact": True}
+
+
 def _norm(df: pd.DataFrame) -> pd.DataFrame:
-    """Make a frame parquet-safe: nullable ints, string objects."""
+    """Make a frame parquet-safe: nullable ints, string objects, stable schema.
+
+    Columns only created when a year actually has (say) a forward-matched event would
+    otherwise make the per-year frames un-concatenable.
+    """
     df = df.copy()
+    for c, v in _SCHEMA_DEFAULTS.items():
+        if c not in df.columns:
+            df[c] = v
     if "mergid" in df:
         df["mergid"] = pd.to_numeric(df["mergid"], errors="coerce").astype("Int64")
     if "nearest_mergid" in df:
@@ -188,4 +199,19 @@ def export(events: pd.DataFrame, active=None, verbose: bool = True):
     if verbose:
         print(f"  wrote {C.OUT_TSV.name} ({len(df)} rows x {df.shape[1]} cols), "
               f"{C.OUT_XLSX.name}, {C.OUT_DICT.name}", flush=True)
+
+    if active is not None and len(active):
+        a = active.copy()
+        # GPKG cannot store an empty geometry; a null geom marks "no detection in window".
+        a.loc[a.geometry.is_empty, "geometry"] = None
+        for c in a.columns:
+            if pd.api.types.is_datetime64_any_dtype(a[c]):
+                a[c] = a[c].dt.strftime("%Y-%m-%d %H:%M:%S")
+        if a.crs is None:
+            a = a.set_crs(C.METRIC_CRS)
+        a.to_file(C.OUT_ACTIVE, driver="GPKG", layer="active_burn")
+        if verbose:
+            nn = int(a.geometry.notna().sum())
+            print(f"  wrote {C.OUT_ACTIVE.name} ({len(a)} rows, {nn} with geometry, "
+                  f"{a.window_h.nunique()} windows)", flush=True)
     return df

@@ -1,3 +1,8 @@
-*.xlsx filter=lfs diff=lfs merge=lfs -text
-*.gpkg filter=lfs diff=lfs merge=lfs -text
-*.html filter=lfs diff=lfs merge=lfs -text
+# Large / binary artefacts via Git LFS. The map is rebuilt often and every
+# version is kept (maps/ archive), so it must not bloat the git pack.
+*.html  filter=lfs diff=lfs merge=lfs -text
+*.gpkg  filter=lfs diff=lfs merge=lfs -text
+*.xlsx  filter=lfs diff=lfs merge=lfs -text
+*.pdf   filter=lfs diff=lfs merge=lfs -text
+
+*.ipynb text

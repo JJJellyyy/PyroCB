@@ -1,6 +1,7 @@
-# ---- source data (fixed external input, ~4.3 GB) -------------------------
-# The FireAtlas yearly archives and derived products are not ours and do not change.
-# Keep them out of the repo; document where they came from instead.
+# ---- source data (fixed external input, tens of GB) ---------------------
+# The FireAtlas yearly archives, derived products and land-cover rasters are
+# not ours and do not change. Keep them out of the repo; document provenance
+# in the README instead.
 /2012/
 /2013/
 /2014/
@@ -13,17 +14,29 @@
 /2021/
 /2022/
 /2023/
+/2024/
+/2025/
 /final_perims/
 /ignitions/
 *.zip
+*.tif                       # 30 m Canada land-cover rasters (~2 GB each)
 
-# ---- derived, reproducible -----------------------------------------------
+# ---- derived, reproducible ---------------------------------------------
 /cache/
 __pycache__/
 *.py[cod]
 .ipynb_checkpoints/
+.venv/
+venv/
 
-# ---- scratch --------------------------------------------------------------
+# ---- scratch ----------------------------------------------------------
 _nb_run.py
 _map_check.js
+run*.log
+nohup.out
+/scratchpad/
 *.tmp
+
+# ---- OS -------------------------------------------------------------------
+.DS_Store
+Thumbs.db
