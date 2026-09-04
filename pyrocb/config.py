@@ -20,7 +20,7 @@ YEARS: list[int] | None = None
 
 # Years for the heavy snapshot/NFP analysis (matching, bands, per-event variables).
 # None -> same as the resolved YEARS.
-SNAPSHOT_YEARS: list[int] | None = [2023]
+SNAPSHOT_YEARS: list[int] | None = None
 
 # ---------------------------------------------------------------- paths
 PERIMS_TPL = str(ROOT / "final_perims" / "final_perims" / "final_viirs{y}.gpkg")
@@ -33,6 +33,7 @@ OUT_HTML   = ROOT / "fire_pcb_map.html"
 OUT_TSV    = ROOT / "pyrocb_fire_attributes.tsv"
 OUT_XLSX   = ROOT / "pyrocb_fire_attributes.xlsx"
 OUT_DICT   = ROOT / "pyrocb_columns.tsv"
+OUT_ACTIVE = ROOT / "pyrocb_active_areas.gpkg"
 CACHE_DIR  = ROOT / "cache"
 
 # ---------------------------------------------------------------- CRS
@@ -61,6 +62,16 @@ MAX_BACKWALK_STEPS  = 30      # 15 days
 MATCH_FORWARD_STEPS = 2       # look this many overpasses AHEAD for a fire that blew up
                               # before it was first observed (the nightly ~10 h gap)
 NFP_WINDOWS_H       = (6, 12, 24)
+# Active-burn polygon: NFP pixel footprints within +/- W hours of onset. Symmetric,
+# because the ~10 h nightly blind window means the run that fed the plume is usually
+# first seen by the overpass AFTER onset (FINDINGS F3).
+ACTIVE_WINDOWS_H    = (6, 12, 24)
+ACTIVE_HEADLINE_H   = 12
+
+# Map scope. True -> the map carries only fires credited with a pyroCb (and their
+# ignitions), which is the analysis population; False -> every tracked fire, which is
+# ~170k polygons and a 27 MB file.
+MAP_ONLY_PCB_FIRES  = True
 STALE_OBS_H         = 14.0    # no overpass within this of onset -> qc_stale_obs
 
 # Local-solar boundaries of the AM/PM overpass groups, measured from NFP datetime_utc.

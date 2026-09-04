@@ -12,6 +12,7 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 
+from . import active as A
 from . import bands as B
 from . import config as C
 from . import io
@@ -79,28 +80,42 @@ def _denorm(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def active_cached(year: int, events: pd.DataFrame):
+    params = {"win": list(C.ACTIVE_WINDOWS_H), "cap": C.MATCH_CAP_KM, "prec": C.PRECISION_M}
+    return C.cached("active", year, params, _inputs(year),
+                    lambda: A.active_polygons(year, events), geo=True)
+
+
 def run_year(year: int, verbose: bool = True):
     if verbose:
         print(f"[{year}]", flush=True)
     m = match_cached(year)
     g, be = bands_cached(year, m)
     ev = events_cached(year, m, be)
-    return m, g, ev
+    act = active_cached(year, ev)
+    # fold the active-burn areas back onto the event rows
+    s = A.summarise(act)
+    if len(s):
+        ev = ev.merge(s, on="pcb_id", how="left")
+    return m, g, ev, act
 
 
 def run(years: list[int], verbose: bool = True):
-    """Run every requested year; returns (events, bands) concatenated."""
-    evs, gs = [], []
+    """Run every requested year; returns (events, bands, active) concatenated."""
+    evs, gs, acts = [], [], []
     for y in years:
-        _, g, ev = run_year(y, verbose)
+        _, g, ev, act = run_year(y, verbose)
         evs.append(ev)
         if len(g):
             gs.append(g)
+        if len(act):
+            acts.append(act)
     events = pd.concat(evs, ignore_index=True) if evs else pd.DataFrame()
-    bands = (pd.concat(gs, ignore_index=True) if gs else B._empty_bands())
-    if len(bands):
-        bands = gpd.GeoDataFrame(bands, geometry="geometry", crs=C.METRIC_CRS)
-    return events, bands
+    bands = pd.concat(gs, ignore_index=True) if gs else B._empty_bands()
+    active = pd.concat(acts, ignore_index=True) if acts else A._empty()
+    bands = gpd.GeoDataFrame(bands, geometry="geometry", crs=C.METRIC_CRS) if len(bands) else bands
+    active = gpd.GeoDataFrame(active, geometry="geometry", crs=C.METRIC_CRS) if len(active) else active
+    return events, bands, active
 
 
 # ------------------------------------------------------------------ export
@@ -142,6 +157,13 @@ DICT = [
     ("snap_flinelen", "km", "Active fire-line length at match_step", "snapshot"),
     ("snap_meanFRP", "W/m2", "Area-normalised mean FRP at match_step", "snapshot"),
     ("snap_n_components", "-", "Snapshot rows sharing this mergid (un-executed merge components)", "snapshot"),
+    ("active_area_km2_12h", "km2", "ACTIVE BURN AREA: union of VIIRS pixel footprints within +/-12 h of onset. The sampling geometry for land cover / ERA5", "NFP"),
+    ("active_area_km2_6h / _24h", "km2", "Same at +/-6 h and +/-24 h, for sensitivity", "NFP"),
+    ("active_n_pixels_12h", "-", "Detections inside that window", "NFP"),
+    ("active_n_obs_12h", "-", "Distinct overpass times in the window; 1 means a single look", "NFP"),
+    ("active_n_before_onset_12h", "-", "Of those detections, how many precede onset", "NFP"),
+    ("active_frp_p95_12h", "MW", "95th percentile FRP of the active-burn pixels", "NFP"),
+    ("match_fwd_steps", "-", "Overpasses searched AHEAD to find a fire that blew up before it was first observed; 0 normally", "derived"),
     ("fire_farea_km2", "km2", "Season-final fire area", "final perimeter"),
     ("fire_duration_days", "d", "Fire duration", "final perimeter"),
     ("fire_lcc_final", "-", "Dominant land cover of the final perimeter", "final perimeter"),
@@ -151,7 +173,7 @@ DICT = [
 ]
 
 
-def export(events: pd.DataFrame, verbose: bool = True):
+def export(events: pd.DataFrame, active=None, verbose: bool = True):
     df = events.copy()
     for c in df.columns:
         if pd.api.types.is_datetime64_any_dtype(df[c]):

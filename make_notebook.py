@@ -64,7 +64,8 @@ import numpy as np
 import pandas as pd
 
 import pyrocb
-from pyrocb import config as C, io, timebins as T, matching, bands, variables, pipeline
+from pyrocb import (config as C, io, timebins as T, matching, bands, active,
+                    variables, pipeline)
 
 pd.set_option("display.max_columns", 60)
 pd.set_option("display.width", 200)
@@ -170,7 +171,7 @@ an overpass whose bulk clearly precedes onset. `obs_lag_h` records how stale the
 pre-band is.
 """)
 code(r"""
-band_geom, band_ev = {}, {}
+band_geom, band_ev, active_geom = {}, {}, {}
 for y in SNAP_YRS:
     band_geom[y], band_ev[y] = pipeline.bands_cached(y, matches[y])
 bd = pd.concat(band_geom.values(), ignore_index=True) if band_geom else None
@@ -215,8 +216,17 @@ and *do* separate them. Without this in mind, a scatter of `area_pre_km2` shows 
 of identical values and looks like a bug.
 """)
 code(r"""
-events = pd.concat([pipeline.events_cached(y, matches[y], band_ev[y]) for y in SNAP_YRS],
-                   ignore_index=True)
+_ev = []
+for y in SNAP_YRS:
+    e = pipeline.events_cached(y, matches[y], band_ev[y])
+    active_geom[y] = pipeline.active_cached(y, e)
+    s = active.summarise(active_geom[y])
+    if len(s):
+        e = e.merge(s, on="pcb_id", how="left")
+    _ev.append(e)
+events = pd.concat(_ev, ignore_index=True)
+active_all = pd.concat([active_geom[y] for y in SNAP_YRS if len(active_geom[y])],
+                       ignore_index=True)
 print(f"{len(events)} events x {events.shape[1]} columns")
 print(f"dedup_collapsed rows: {int(events.dedup_collapsed.fillna(False).sum())}")
 events[["pcb_id", "fire_name", "mergid", "pcb_index", "n_pcb_total", "n_pcb_before", "n_pcb_after",
@@ -249,7 +259,7 @@ md(r"""
 column's units, definition and source file, for handing to collaborators.
 """)
 code(r"""
-_ = pipeline.export(events)
+_ = pipeline.export(events, active_all)
 """)
 
 md(r"""
@@ -352,8 +362,21 @@ for y in YEARS:
     else:
         b64["bnd"], _, _ = pack({"type": "FeatureCollection", "features": []})
 
+    ag = active_geom.get(y)
+    if ag is not None and len(ag):
+        ag = ag[ag.window_h == C.ACTIVE_HEADLINE_H].copy()
+        ag["geometry"] = ag.geometry.simplify(C.BAND_SIMPLIFY_M, preserve_topology=True)
+        ag = gpd.GeoDataFrame(ag, geometry="geometry", crs=C.METRIC_CRS).to_crs(C.WGS84)
+        ag = ag[~ag.geometry.is_empty & ag.geometry.notna()]
+        ag["doy"] = pd.to_datetime(ag["datetime"]).dt.dayofyear
+        ag["datetime"] = pd.to_datetime(ag["datetime"]).dt.strftime("%Y-%m-%d %H:%M")
+        for c in ("t_first", "t_last"):
+            ag[c] = pd.to_datetime(ag[c]).dt.strftime("%Y-%m-%d %H:%M")
+        b64["act"], _, _ = pack(json.loads(ag.to_json(drop_id=True)))
+    else:
+        b64["act"], _, _ = pack({"type": "FeatureCollection", "features": []})
+
     payloads[y] = b64
-    doys.append(per_out[["doy", "farea_km2"]].dropna())
     print(f"  {y}: {len(per_out):>6} perims  {len(ign_out):>6} ignitions  {len(pg):>3} pyroCb"
           f"  {0 if bg is None else len(bg):>3} bands   packed {(gp+gi)/1e6:5.2f} MB", flush=True)
 
@@ -475,16 +498,16 @@ const map = L.map("map").setView([62,-105], 3);
 L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
   {maxZoom:19, attribution:"&copy; OpenStreetMap"}).addTo(map);
 
-const PANES = ["per","bnd","ign","pcb","orp"];
+const PANES = ["per","act","bnd","ign","pcb","orp"];
 const R = {};
 PANES.forEach((k,i)=>{ map.createPane(k); map.getPane(k).style.zIndex = 410+i*10;
                        R[k] = L.canvas({pane:k}); });
 map.createPane("lbl"); map.getPane("lbl").style.zIndex = 470;
 
-const ALL = ["per","perL","bnd","ign","ignL","pcb","pcbC","orp"];
+const ALL = ["per","perL","act","bnd","ign","ignL","pcb","pcbC","orp"];
 const cache = {}, byFire = {};
 const activeYears = new Set([YEARS[YEARS.length-1]]);
-const showKind = {per:true, bnd:true, ign:true, pcb:true, orp:true};
+const showKind = {per:true, act:true, bnd:true, ign:true, pcb:true, orp:true};
 let onlyPcbFires=false, hideOrphans=false;
 
 function buildLayers(y, gj){
@@ -553,10 +576,27 @@ function buildLayers(y, gj){
   };
   const bndLayerStyle = l => l.setStyle(bndOpts.style(l.feature));
 
+  // Active burn area: union of VIIRS pixel footprints within +/-12 h of onset. This is
+  // the polygon the land-cover and ERA5 covariates get sampled over, so it is drawn as a
+  // bright outline on top rather than a fill - you need to see what it covers.
+  const actOpts = {
+    pane:"act", renderer:R.act,
+    style: ft => ({color:"#00e5ff", weight:1.6, fill:true, fillColor:"#00e5ff",
+                   fillOpacity:0.18, dashArray:"4 3"}),
+    onEachFeature:(ft,l)=>{const p=ft.properties;
+      l.bindPopup(`<b>Active burn at onset &plusmn;${p.window_h} h</b><br>${esc(p.pcb_id)}<table>${rows([
+        ["Fire (mergid)",p.mergid],["Onset (UTC)",p.datetime],
+        ["Active area (km²)",p.area_km2],["Raw pixel footprint (km²)",p.footprint_km2],
+        ["VIIRS detections",p.n_pixels],["Distinct overpasses",p.n_obs],
+        ["Detections before / after onset",p.n_before_onset+" / "+p.n_after_onset],
+        ["FRP p95 (MW)",p.frp_p95],["First / last obs",p.t_first+" → "+p.t_last]])}</table>`);}
+  };
+
   return {
     per:  L.geoJSON(gj.per, perOpts(undefined)),
     perL: L.geoJSON(gj.per, perOpts(f=>f.properties.pcb_linked===true)),
     bnd:  L.geoJSON(gj.bnd, bndOpts),
+    act:  L.geoJSON(gj.act, actOpts),
     ign:  L.geoJSON(gj.ign, ignOpts(undefined)),
     ignL: L.geoJSON(gj.ign, ignOpts(f=>f.properties.pcb_linked===true)),
     pcb:  L.geoJSON(gj.pcb, pcbOpts(undefined)),
@@ -576,6 +616,7 @@ function wanted(){
   const w = new Set();
   if (showKind.per) w.add(onlyPcbFires?"perL":"per");
   if (showKind.bnd) w.add("bnd");
+  if (showKind.act) w.add("act");
   if (showKind.ign) w.add(onlyPcbFires?"ignL":"ign");
   if (showKind.pcb) w.add(hideOrphans?"pcbC":"pcb");
   if (showKind.orp && !hideOrphans) w.add("orp");
@@ -585,8 +626,8 @@ function wanted(){
 async function ensureYear(y){
   if (cache[y]) return cache[y];
   const d = DATA[y];
-  const [per,ign,pcb,bnd] = await Promise.all([d.per,d.ign,d.pcb,d.bnd].map(unpack));
-  cache[y] = buildLayers(y,{per,ign,pcb,bnd});
+  const [per,ign,pcb,bnd,act] = await Promise.all([d.per,d.ign,d.pcb,d.bnd,d.act].map(unpack));
+  cache[y] = buildLayers(y,{per,ign,pcb,bnd,act});
   return cache[y];
 }
 
@@ -654,6 +695,7 @@ panel.onAdd = () => {
     <div class="layers">
       <label><input type="checkbox" data-kind="per" checked> Fire perimeters</label>
       <label><input type="checkbox" data-kind="bnd" checked> Growth bands (split at pyroCb)</label>
+      <label><input type="checkbox" data-kind="act" checked> Active burn area at onset (&plusmn;12 h)</label>
       <label><input type="checkbox" data-kind="ign" checked> Fire ignitions</label>
       <label><input type="checkbox" data-kind="pcb" checked> pyroCb events</label>
       <label><input type="checkbox" data-kind="orp" checked> Flag unmatched pyroCb</label>
@@ -689,6 +731,7 @@ function drawLegend(){
     <div class="row"><i style="background:#888"></i>Ignition</div>
     <div class="row"><i style="background:#888;border:1.5px solid #111"></i>pyroCb (labelled with its # on the fire)</div>
     <div class="row"><i style="border:2px solid #e11;background:none"></i>unmatched pyroCb</div>
+    <div class="row"><i class="sq" style="border:2px solid #00e5ff;background:rgba(0,229,255,.18)"></i>active burn at onset (&plusmn;12 h)</div>
     <div class="sub" style="margin-top:5px">Growth bands: pale core = burned before the first
     pyroCb, darker = later runs; the faintest outer band is after the last pyroCb.</div>`;
   if (MODE==="year"){

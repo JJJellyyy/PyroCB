@@ -172,7 +172,9 @@ def read_ignitions(year: int) -> gpd.GeoDataFrame:
 
 
 # ---------------------------------------------------------------- NFP
-_NFP_COLS = ["mergid", "y", "x", "frp", "sat", "datetime_utc"]
+# DS/DT are the along-scan / along-track pixel dimensions in km; needed to give each
+# detection its real footprint when building the active-burn polygon.
+_NFP_COLS = ["mergid", "y", "x", "DS", "DT", "frp", "sat", "datetime_utc"]
 
 
 def read_nfp_year(year: int) -> pd.DataFrame:
@@ -199,7 +201,8 @@ def read_nfp_year(year: int) -> pd.DataFrame:
         out = pd.concat(frames, ignore_index=True)
         out["datetime_utc"] = pd.to_datetime(out["datetime_utc"])
         out["mergid"] = out["mergid"].astype("int64")
-        out["frp"] = out["frp"].astype("float32")
+        for c in ("frp", "DS", "DT"):
+            out[c] = out[c].astype("float32")
         return out
 
     return C.cached("nfp", year, {"cols": _NFP_COLS}, files[:1] + files[-1:], build)
