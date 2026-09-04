@@ -1,0 +1,29 @@
+# ---- source data (fixed external input, ~4.3 GB) -------------------------
+# The FireAtlas yearly archives and derived products are not ours and do not change.
+# Keep them out of the repo; document where they came from instead.
+/2012/
+/2013/
+/2014/
+/2015/
+/2016/
+/2017/
+/2018/
+/2019/
+/2020/
+/2021/
+/2022/
+/2023/
+/final_perims/
+/ignitions/
+*.zip
+
+# ---- derived, reproducible -----------------------------------------------
+/cache/
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# ---- scratch --------------------------------------------------------------
+_nb_run.py
+_map_check.js
+*.tmp

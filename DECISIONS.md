@@ -1,0 +1,167 @@
+# DECISIONS
+
+Every methodological choice, why it was made, and what it rules out. Append here whenever a
+choice is made — the point is that a reviewer (or you in six months) can reconstruct *why* the
+numbers are what they are.
+
+Format: **D-n — decision.** Context → choice → rationale → consequence/alternative rejected.
+
+Data-driven discoveries live in [FINDINGS.md](FINDINGS.md); release history in
+[CHANGELOG.md](CHANGELOG.md).
+
+---
+
+## Scope and identity
+
+### D-1 — Join everything on `mergid`
+`fireid` is the pre-merge id and is unsafe (see F1: incomplete in snapshots, a meaningless row
+counter in NFP). `mergid` is 1:1 across all four products.
+**Rejected:** joining on `fireid`, which silently drops merged components and can attach a
+polygon 92 km from the real fire.
+
+### D-2 — `YEARS = None` means "years with fire data *and* pyroCb records"
+Resolves to 2013–2023, so **2012 drops out on its own** for the stated reason (no pyroCb
+coverage) rather than being hard-coded. Adding 2024+ data needs no code change.
+**Rejected:** `YEARS = [2013, …, 2023]` literal, which silently rots.
+
+### D-3 — `SNAPSHOT_YEARS` gates the heavy analysis separately from the map
+The map is cheap per year; snapshot/NFP matching is not. Two knobs let the map cover all years
+while the expensive pipeline runs on a subset. `None` → same as `YEARS`.
+
+### D-4 — `pcb_id = PCB_YYYY_MMDD_HHMM` + deterministic `a/b/c` suffix
+The requested format collides on outbreak days (F8). Suffix ordered by (lat, lon) so ids are
+unique *and* stable across rebuilds.
+**Rejected:** appending `mergid` — informative, but the id would change whenever matching
+parameters change, which defeats the purpose of a stable key.
+
+---
+
+## Coordinate systems and geometry
+
+### D-5 — All metric work in EPSG:3571
+"WGS 84 / North Pole LAEA Bering Sea": equal-area (so `area/1e6` is a defensible km²) and centred
+on lon 180, making the dateline — where Chukotka fires sit — the *least* distorted part of the
+projection. Three of four inputs are already native 3571, so booleans operate on bit-identical
+source coordinates. Convert to 4326 only for the map payload.
+**Rejected:** working in degrees. A metre-scale sliver threshold is impossible at 50–72°N
+(0.00001° is 1.1 m in latitude but 0.35 m in longitude at 70°N), and antimeridian differences
+produce world-spanning garbage.
+
+### D-6 — `make_valid`, never `buffer(0)`
+`buffer(0)` silently deletes the smaller loop of a bowtie and can drop whole MultiPolygon lobes —
+it changes area without saying so, which is fatal when the output *is* an area. `make_valid`
+preserves area. Cost is negligible: 0 of 1413 snapshot geometries are invalid.
+
+### D-7 — Snap both boolean operands to a common 1 m grid
+`set_precision(1.0, mode="valid_output")` before every difference makes the operation
+topologically exact and removes hairline slivers. 1 m is 1/375 of a VIIRS pixel, so it discards
+nothing real. Applied only to the few fires that get banded — it costs ~2 s per 1400 geometries,
+so it is deliberately *not* run over whole snapshots (that alone took read time from 8 s to 0.7 s).
+
+### D-8 — Two sliver thresholds at different levels
+`SLIVER_KM2 = 0.02` per exploded polygon part (observed slivers after snapping are < 1e-4 km²),
+so a genuine 40 km² band is not discarded for carrying a 2 m² hair. `MIN_BAND_KM2 = 0.5`
+(≈ 3.5 VIIRS pixels) on the band total, for whether to emit geometry.
+**A sub-threshold band keeps its row and loses only its geometry**, so band index stays aligned
+with event index.
+
+---
+
+## Matching pyroCb to fires
+
+### D-9 — Match against the *snapshot*, not the season-final perimeter
+The final footprint of a big fire can be 100 km across; a point inside it says nothing about
+whether the fire had reached that spot on the day, and a fire that ignited weeks later would
+still swallow the point. The snapshot at onset is the fire as it actually was.
+
+### D-10 — Containment first, then nearest active fire within a cap
+`MATCH_CAP_KM = 20`, ~2.5× the worst-case 0.1° rounding displacement (~7.8 km). A 10/20/30 km
+sensitivity is reported every run; the nearest fire never changes with the cap, only acceptance.
+**Consequence:** `match_dist_km > 5 km` should be treated as provisional.
+
+### D-11 — Three rescue tiers, in order
+1. **Forward search** (`_rescue_new_fire`, up to 2 overpasses) for fires that blew up inside the
+   nightly blind window before being observed — see F4. Recovered 2 of 40 in 2023.
+2. **Dormant search** against final perimeters whose start–end interval brackets onset, for fires
+   hidden by cloud that overpass. Rescued **0** in 2023 — which is itself the evidence that the
+   remaining unmatched events are genuinely absent from the atlas (F10).
+3. Otherwise `unmatched`, with fire columns null.
+
+### D-12 — Keep unmatched events in the export
+They are non-random (F10), so silently dropping them biases the sample toward well-detected
+boreal forest fires. Flagged via `match_method`, never deleted.
+
+---
+
+## Growth bands
+
+### D-13 — Split at *every* pyroCb, not just the first
+A fire with N distinct pyroCb half-day steps yields N+1 concentric bands. Measured for 2023:
+51 of 70 fires have a single step (a simple 2-band split), only 3 exceed 3 steps (max 9 → 10
+bands), so the rings stay legible.
+**Rejected:** splitting only at the first or the largest pyroCb — loses the pulse-by-pulse growth
+that motivates the whole exercise.
+
+### D-14 — Build a running cumulative *union*, never difference raw snapshots
+`S_i = S_{i-1} ∪ V(snap(t_i))`, then `B_i = S_i \ S_{i-1}`. Consecutive snapshots are not
+perfectly nested (F5), so plain differencing yields negative-area bands and rings that punch
+holes in each other.
+**Guarantees:** bands disjoint, non-negative, exactly tiling `S_final`; `area_pre` monotone in
+event index; `frac_burned_before ∈ [0,1]` by construction; high fill opacity is safe on the map.
+**Verified for 2023:** 0 overlapping fires, max relative error 2e-4, 0 negative bands.
+**But:** `qc_regress_km2` / `qc_final_smaller` record what the union papered over, so the
+correction is auditable rather than invisible.
+
+### D-15 — Pick the pre-band step from NFP observation times (Tier A), not a clock
+`step_before = max{ s : t_med(mergid, s) < onset }`, using the **median** detection time so one
+stray late pixel cannot disqualify an overpass whose bulk precedes onset. Needs no local-time
+model at all. Tier B (local-solar clock, using the *fire's* centroid longitude, not the atlas's
+rounded lon) only if the fire has no NFP; Tier C walks back over missing files.
+**2023 result:** Tier A resolved 119/119 events, 0 back-walks.
+
+### D-16 — Deduplicate bands, keep events
+Two events on the same fire in the same half-day share a band, so every step-derived column is
+**identical** for them — genuinely unresolvable at 12-hourly sampling. Both events keep their own
+row; `dedup_collapsed` flags them. NFP-derived columns still separate them.
+**Documented loudly** because otherwise a scatter of `area_pre_km2` shows vertical stacks of
+identical values and looks like a bug.
+
+---
+
+## Presentation
+
+### D-17 — Colour by year *or* day-of-year, with the DOY window fitted to the whole dataset
+Fitted **area-weighted**: an unweighted percentile over fire counts gives (16, 348), dragged out
+by tiny January crop fires, wasting the entire gradient on months with no boreal burning. The
+area-weighted 1–99% span is (69, 281), widened to cover every pyroCb → **(69, 283)**, 98.2% of
+all burned area. Refitting on new years extends it automatically.
+**Rejected:** per-year fitting — maximises within-year contrast but makes colours incomparable
+between years.
+
+### D-18 — Band order in lightness, hue reserved for the colour mode
+Year mode: hue = year colour, lightness stepped 0.78 (pale pre-pyroCb core) → 0.34 (dark late
+runs). DOY mode: hue = day-of-year, so band order moves to stroke weight. The outermost band
+("everything after the last pyroCb, at unknown times") is drawn fainter so it cannot be misread
+as a growth episode of known duration.
+
+### D-19 — Lazy per-year decompression in the map
+Each year's payload is gzip+base64 embedded and unpacked only when the year is switched on. That
+is what lets a 27 MB file carrying ~170 k polygons open quickly.
+
+### D-20 — Analysis lives in a package, not in notebook string literals
+`make_notebook.py` emits the notebook; the logic sits in `pyrocb/` so it can be imported, tested,
+linted and profiled. The notebook narrates and calls it.
+
+### D-21 — Cache one parquet per (stage, year)
+Keyed on `CODE_VERSION` + a hash of the *relevant* config subset + input mtimes, so changing an
+unrelated constant does not invalidate a stage. Every stage is per-year and independent, so
+widening `SNAPSHOT_YEARS` reuses what is already computed. Warm reruns: 0.3 s.
+
+---
+
+## Version control
+
+### D-22 — Git with LFS for the large binary outputs
+Maps are ~27 MB of base64, which git deltas poorly. `*.html`, `*.xlsx` and `*.gpkg` go to LFS so
+every historical map stays retrievable without bloating the pack. Source data (~4.3 GB of yearly
+archives) is **not** tracked — it is a fixed external input, listed in `.gitignore`.
