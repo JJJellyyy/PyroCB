@@ -7,6 +7,26 @@ Rationale for each choice lives in [DECISIONS.md](DECISIONS.md); data discoverie
 
 ---
 
+## v0.8 — 2026-09-04 — click-to-highlight active burn area, blow-up flag
+
+### Added
+* **Click a pyroCb marker to highlight its active-burn area.** Builds a one-off overlay from
+  that event's own `pyrocb_active_areas` polygon (±12 h window) in a dedicated top pane, and
+  fits the map to it, instead of relying on the always-on cyan outline alone.
+* **Blow-up flag.** `active_is_blowup` — every VIIRS detection in the ±12 h window postdates
+  onset, i.e. the fire was first observed *after* its own pyroCb (F4: the ~10 h nightly
+  overpass gap). Computed once in Python so the map and attribute table agree; a click on a
+  flagged event pops a banner explaining the highlighted area is post-onset, not pre-onset.
+  2023: 3 events, including `PCB_2023_0625_0000` — the `2023-R90877` type case from F4.
+  A second banner covers the plain "no detections in this window" case.
+
+### Removed
+* **"Only fires with a pyroCb" toggle.** Redundant since v0.7 wired `MAP_ONLY_PCB_FIRES` into
+  the payload itself — the layers it switched between were already identical. Also dropped
+  the now-always-true "Linked to a pyroCb" popup row on perimeters/ignitions.
+
+---
+
 ## v0.7 — 2026-09-04 — all-year map lands, ignition stars, export & build fixes
 
 The v0.6 all-years run computed every stage but **never produced a working map or the

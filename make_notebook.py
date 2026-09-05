@@ -341,11 +341,24 @@ for y in YEARS:
     for c in pg.columns:
         if pd.api.types.is_datetime64_any_dtype(pg[c]):
             pg[c] = pg[c].dt.strftime("%Y-%m-%d %H:%M")
+
+    # "Blew up before it was ever observed": the +/-12h active-burn window has
+    # detections, but every one of them comes from the overpass AFTER onset - the fire
+    # existed and was already burning, it just wasn't seen until the next look (F4).
+    # Flagged so the map can say so explicitly rather than silently using post-onset
+    # pixels as if they were "the fire at onset".
+    if "active_n_pixels_12h" in pg.columns:
+        pg["active_is_blowup"] = ((pg["active_n_pixels_12h"] > 0)
+                                   & (pg["active_n_before_onset_12h"] == 0))
+
     pg = pg[[c for c in ("pcb_id", "datetime", "doy", "fire_name", "region", "status",
                          "max_inject_alt", "trop_relative_alt", "pcb_min_bt", "mergid",
                          "match_method", "match_dist_km", "pcb_index", "n_pcb_total",
                          "n_pcb_before", "n_pcb_after", "n_ign_total", "area_pre_km2",
-                         "area_post_km2", "frac_burned_before", "obs_lag_h", "geometry")
+                         "area_post_km2", "frac_burned_before", "obs_lag_h",
+                         "active_area_km2_12h", "active_n_pixels_12h", "active_n_obs_12h",
+                         "active_n_before_onset_12h", "active_n_after_onset_12h",
+                         "active_frp_p95_12h", "active_is_blowup", "geometry")
                 if c in pg.columns]]
 
     # Fires credited with a pyroCb, for the "only fires with a pyroCb" filter.
@@ -478,11 +491,21 @@ HTML = """<!DOCTYPE html>
   .leaflet-popup-content{font:12px/1.45 system-ui,sans-serif;max-height:340px;overflow:auto}
   #busy{position:absolute;z-index:9999;top:12px;left:50%;transform:translateX(-50%);
         background:#222;color:#fff;padding:6px 14px;border-radius:14px;font:12px system-ui;display:none}
+  #notice{position:absolute;z-index:9999;top:12px;left:50%;transform:translateX(-50%);
+        max-width:420px;background:#fff3cd;color:#664d03;border:1px solid #ffda6a;
+        padding:8px 14px;border-radius:8px;font:12px/1.4 system-ui;display:none;
+        box-shadow:0 2px 10px rgba(0,0,0,.25)}
+  #notice.info{background:#e7f1ff;color:#084298;border-color:#9ec5fe}
+  #notice b{display:block;margin-bottom:2px}
+  #notice .x{float:right;cursor:pointer;font-weight:700;margin-left:8px}
+  .active-hl{animation:hlpulse 1.1s ease-in-out infinite alternate}
+  @keyframes hlpulse{from{stroke-opacity:.55}to{stroke-opacity:1}}
 </style>
 </head>
 <body>
 <div id="map"></div>
 <div id="busy">Loading&hellip;</div>
+<div id="notice"></div>
 <script>
 const DATA=__DATA__, YEARS=__YEARS__, YCOL=__COLORS__, RAMP=__RAMP__;
 const DOY0=__DOY0__, DOY1=__DOY1__, ORPHAN_KM=__ORPHAN__;
@@ -496,6 +519,51 @@ const esc = s => s==null ? "" : String(s).replace(/[&<>]/g, c => ({"&":"&amp;","
 const rows = l => l.filter(r => r[1]!=null && r[1]!=="" && r[1]!==false)
   .map(r=>`<tr><td style="color:#666;padding-right:8px;vertical-align:top">${esc(r[0])}</td><td>${esc(r[1])}</td></tr>`).join("");
 const busy = document.getElementById("busy");
+const noticeEl = document.getElementById("notice");
+function showNotice(kind, html){
+  noticeEl.className = kind;
+  noticeEl.innerHTML = `<span class="x" title="dismiss">&times;</span>${html}`;
+  noticeEl.style.display = "block";
+  noticeEl.querySelector(".x").onclick = () => noticeEl.style.display="none";
+}
+function hideNotice(){ noticeEl.style.display = "none"; }
+
+// pyroCb -> its active-burn GeoJSON feature (raw, not a layer), keyed by the globally
+// unique pcb_id so a click works regardless of which years are currently toggled on.
+const byPcbActive = {};
+let highlightLayer = null;
+function clearHighlight(){
+  if (highlightLayer){ map.removeLayer(highlightLayer); highlightLayer = null; }
+}
+function hasGeom(ft){
+  return !!(ft && ft.geometry && ft.geometry.coordinates && ft.geometry.coordinates.length);
+}
+// Click a pyroCb marker -> highlight the active-burn area (VIIRS detections within
+// +/-12 h of onset) it was matched to, and flag the two cases worth knowing about:
+// no detections at all in the window, or (F4) a fire that blew up before it was ever
+// observed, where every detection in the window comes from AFTER onset.
+function showActiveHighlight(p){
+  clearHighlight();
+  const ft = byPcbActive[p.pcb_id];
+  const got = hasGeom(ft);
+  if (p.active_is_blowup){
+    showNotice("warn", `<b>&#9888; Blow-up fire</b> No VIIRS detections before onset within `
+      +`&plusmn;12 h &mdash; this fire was first observed by the overpass <i>after</i> the `
+      +`pyroCb (see FINDINGS F4). The highlighted area uses those post-onset detections; it is `
+      +`not the true pre-onset state.`);
+  } else if (!got){
+    showNotice("info", `<b>No active-burn area</b> No VIIRS detections within &plusmn;12 h `
+      +`of this pyroCb.`);
+  } else {
+    hideNotice();
+  }
+  if (got){
+    highlightLayer = L.geoJSON(ft, {pane:"hl",
+      style: () => ({color:"#ff9800", weight:4, fillColor:"#ff9800", fillOpacity:0.42})
+    }).addTo(map);
+    try { map.fitBounds(highlightLayer.getBounds().pad(0.4), {maxZoom:11}); } catch(e){}
+  }
+}
 
 // ---- colour ---------------------------------------------------------------
 function hex2rgb(h){return [1,3,5].map(i=>parseInt(h.slice(i,i+2),16));}
@@ -535,26 +603,27 @@ PANES.forEach((k,i)=>{ map.createPane(k); map.getPane(k).style.zIndex = 410+i*10
                        R[k] = L.canvas({pane:k}); });
 map.createPane("ignlbl"); map.getPane("ignlbl").style.zIndex = 445;   // stars: above bands, below pyroCb
 map.createPane("lbl"); map.getPane("lbl").style.zIndex = 470;
+map.createPane("hl");  map.getPane("hl").style.zIndex = 480;          // active-burn highlight: on top of all
 
-const ALL = ["per","perL","act","bnd","ign","ignL","pcb","pcbC","orp"];
+const ALL = ["per","act","bnd","ign","pcb","pcbC","orp"];
 const cache = {}, byFire = {};
 const activeYears = new Set([YEARS[YEARS.length-1]]);
 const showKind = {per:true, act:true, bnd:true, ign:true, pcb:true, orp:true};
-let onlyPcbFires=false, hideOrphans=false;
+let hideOrphans=false;
 
 function buildLayers(y, gj){
-  const perOpts = f => ({
-    pane:"per", renderer:R.per, filter:f,
+  const perOpts = {
+    pane:"per", renderer:R.per,
     style: ft => ({color:hueOf(y,ft), weight:1, fillColor:hueOf(y,ft),
                    fillOpacity:(ft.properties.farea_km2||0)>100?0.55:0.3}),
     onEachFeature:(ft,l)=>{const p=ft.properties;
       l.bindPopup(`<b>Fire #${esc(p.mergid)}</b> ${y}<table>${rows([
         ["Area (km²)",p.farea_km2],["Duration (d)",p.duration_days],
-        ["VIIRS pixels",p.n_pixels],["Land cover",p.lcc_final],["Day of year",p.doy],
-        ["Linked to a pyroCb",p.pcb_linked?"yes":"no"]])}</table>`);}
-  });
-  const ignOpts = f => ({
-    pane:"ignlbl", filter:f,
+        ["VIIRS pixels",p.n_pixels],["Land cover",p.lcc_final],
+        ["Day of year",p.doy]])}</table>`);}
+  };
+  const ignOpts = {
+    pane:"ignlbl",
     pointToLayer:(ft,ll)=>L.marker(ll,{pane:"ignlbl", icon:starIcon(hueOf(y,ft),
       ft.properties.ign_index)}),
     onEachFeature:(ft,l)=>{const p=ft.properties;
@@ -563,7 +632,7 @@ function buildLayers(y, gj){
         ["Order within fire",p.ign_index+" of "+p.n_ign_total+" (by ignition time)"],
         ["Day of year",p.doy],["Fuel",p.ftype],["Area (km²)",p.farea_km2],
         ["VIIRS pixels",p.n_pixels]])}</table>`);}
-  });
+  };
   const pcbOpts = f => ({
     pane:"pcb", renderer:R.pcb, filter:f,
     pointToLayer:(ft,ll)=>{
@@ -574,7 +643,9 @@ function buildLayers(y, gj){
                : L.circleMarker(ll,{pane:"pcb",renderer:R.pcb,radius:6,color:"#111",
                    weight:1.5,fillColor:hueOf(y,ft),fillOpacity:1});},
     onEachFeature:(ft,l)=>{const p=ft.properties;
-      l.bindPopup(`<b>${esc(p.pcb_id)}</b><br>${esc(p.fire_name||"unnamed")}<table>${rows([
+      l.bindPopup(`<b>${esc(p.pcb_id)}</b><br>${esc(p.fire_name||"unnamed")}`
+        +(p.active_is_blowup?` <span title="Blew up before it was ever observed">&#9888;&#65039;</span>`:"")
+        +`<table>${rows([
         ["Date/time (UTC)",p.datetime],["Region",p.region],["Day of year",p.doy],
         ["Max injection alt (m)",p.max_inject_alt],["Rel. tropopause (m)",p.trop_relative_alt],
         ["Min BT (°C)",p.pcb_min_bt],["Match",p.match_method],["Dist. to fire (km)",p.match_dist_km],
@@ -583,7 +654,12 @@ function buildLayers(y, gj){
         ["Ignitions in complex",p.n_ign_total],
         ["Area before (km²)",p.area_pre_km2],["Area after (km²)",p.area_post_km2],
         ["Fraction burned before",p.frac_burned_before],
-        ["Obs lag (h)",p.obs_lag_h]])}</table>`);}
+        ["Obs lag (h)",p.obs_lag_h],
+        ["Active burn &plusmn;12h (km²)",p.active_area_km2_12h],
+        ["Active-burn detections",p.active_n_pixels_12h],
+        ["  before / after onset",p.active_n_before_onset_12h+" / "+p.active_n_after_onset_12h],
+        ["Blew up before observed",p.active_is_blowup?"yes — see notice":""]])}</table>`);
+      l.on("click", () => showActiveHighlight(p));}
   });
   const bndOpts = {
     pane:"bnd", renderer:R.bnd,
@@ -618,6 +694,7 @@ function buildLayers(y, gj){
     style: ft => ({color:"#00e5ff", weight:1.6, fill:true, fillColor:"#00e5ff",
                    fillOpacity:0.18, dashArray:"4 3"}),
     onEachFeature:(ft,l)=>{const p=ft.properties;
+      byPcbActive[p.pcb_id] = ft;
       l.bindPopup(`<b>Active burn at onset &plusmn;${p.window_h} h</b><br>${esc(p.pcb_id)}<table>${rows([
         ["Fire (mergid)",p.mergid],["Onset (UTC)",p.datetime],
         ["Active area (km²)",p.area_km2],["Raw pixel footprint (km²)",p.footprint_km2],
@@ -627,12 +704,10 @@ function buildLayers(y, gj){
   };
 
   return {
-    per:  L.geoJSON(gj.per, perOpts(undefined)),
-    perL: L.geoJSON(gj.per, perOpts(f=>f.properties.pcb_linked===true)),
+    per:  L.geoJSON(gj.per, perOpts),
     bnd:  L.geoJSON(gj.bnd, bndOpts),
     act:  L.geoJSON(gj.act, actOpts),
-    ign:  L.geoJSON(gj.ign, ignOpts(undefined)),
-    ignL: L.geoJSON(gj.ign, ignOpts(f=>f.properties.pcb_linked===true)),
+    ign:  L.geoJSON(gj.ign, ignOpts),
     pcb:  L.geoJSON(gj.pcb, pcbOpts(undefined)),
     pcbC: L.geoJSON(gj.pcb, pcbOpts(f=>f.properties.match_method!=="unmatched")),
     orp:  L.geoJSON(gj.pcb, {pane:"orp", renderer:R.orp,
@@ -648,10 +723,10 @@ function buildLayers(y, gj){
 
 function wanted(){
   const w = new Set();
-  if (showKind.per) w.add(onlyPcbFires?"perL":"per");
+  if (showKind.per) w.add("per");
   if (showKind.bnd) w.add("bnd");
   if (showKind.act) w.add("act");
-  if (showKind.ign) w.add(onlyPcbFires?"ignL":"ign");
+  if (showKind.ign) w.add("ign");
   if (showKind.pcb) w.add(hideOrphans?"pcbC":"pcb");
   if (showKind.orp && !hideOrphans) w.add("orp");
   return w;
@@ -669,6 +744,7 @@ let refreshing=false, pending=false;
 async function refresh(){
   if (refreshing){ pending=true; return; }
   refreshing=true;
+  clearHighlight(); hideNotice();
   do {
     pending=false;
     const need = YEARS.filter(y=>activeYears.has(y) && !cache[y]);
@@ -698,12 +774,12 @@ async function refresh(){
 function recolour(){
   for (const y of Object.keys(cache)){
     const c = cache[y];
-    ["per","perL"].forEach(k=>c[k].setStyle(ft=>({color:hueOf(y,ft),fillColor:hueOf(y,ft),
-      weight:1, fillOpacity:(ft.properties.farea_km2||0)>100?0.55:0.3})));
-    ["ign","ignL"].forEach(k=>c[k].eachLayer(l=>{
+    c.per.setStyle(ft=>({color:hueOf(y,ft),fillColor:hueOf(y,ft),
+      weight:1, fillOpacity:(ft.properties.farea_km2||0)>100?0.55:0.3}));
+    c.ign.eachLayer(l=>{
       const el=l.getElement&&l.getElement(), pth=el&&el.querySelector("path");
       if (pth) pth.setAttribute("fill", hueOf(y,l.feature));
-    }));
+    });
     ["pcb","pcbC"].forEach(k=>c[k].eachLayer(l=>{
       if (l.setStyle) l.setStyle({fillColor:hueOf(y,l.feature)});
       else if (l.getElement && l.getElement()) l.getElement().firstChild.style.background = hueOf(y,l.feature);
@@ -738,9 +814,9 @@ panel.onAdd = () => {
       <label><input type="checkbox" data-kind="orp" checked> Flag unmatched pyroCb</label>
     </div>
     <div class="layers">
-      <label><input type="checkbox" id="onlyPcb"> Only fires with a pyroCb</label>
       <label><input type="checkbox" id="hideOrp"> Hide unmatched pyroCb</label>
-    </div>`;
+    </div>
+    <div class="sub" style="margin-top:6px">Click a pyroCb to highlight its active-burn area.</div>`;
   L.DomEvent.disableClickPropagation(d); L.DomEvent.disableScrollPropagation(d);
   d.querySelectorAll(".chip").forEach(c=>c.onclick=()=>{
     const y=+c.dataset.year; activeYears.has(y)?activeYears.delete(y):activeYears.add(y); refresh();});
@@ -748,7 +824,6 @@ panel.onAdd = () => {
   d.querySelector("#noneY").onclick = ()=>{activeYears.clear(); refresh();};
   d.querySelectorAll("input[data-kind]").forEach(i=>i.onchange=()=>{
     showKind[i.dataset.kind]=i.checked; refresh();});
-  d.querySelector("#onlyPcb").onchange = e=>{onlyPcbFires=e.target.checked; refresh();};
   d.querySelector("#hideOrp").onchange = e=>{hideOrphans=e.target.checked; refresh();};
   const my=d.querySelector("#mYear"), mdy=d.querySelector("#mDoy");
   my.onclick  = ()=>{MODE="year"; my.classList.add("on"); mdy.classList.remove("on"); recolour();};

@@ -172,6 +172,26 @@ solid blobs before simplifying to 150 m; bands get `buffer ±60 m` + 150 m. The 
 show *roughly where*; the exact sampling geometry — what land-cover fractions and ERA5 are
 computed against — is untouched in `pyrocb_active_areas.gpkg`. Cut the map 26 MB → 10 MB.
 
+### D-27 — Drop the "only fires with a pyroCb" toggle
+Made redundant by D-24: once the payload itself is pre-filtered to the analysis population,
+the "linked" and "unlinked" layers it toggled between are identical, so the checkbox did
+nothing. Removed the toggle, the duplicate `perL`/`ignL` layers, and the now-always-true
+"Linked to a pyroCb" popup row.
+
+### D-28 — Highlight the active-burn area by click, not as a permanent overlay
+Clicking a pyroCb marker builds a one-off highlight layer from that event's own
+`pyrocb_active_areas` feature (indexed by the globally-unique `pcb_id`, so it works
+regardless of which years are toggled on) and fits the map to it, rather than relying on
+the always-on cyan `act` layer alone. Two things fall out of doing this per-click instead of
+per-layer-style: (1) a genuinely empty window (no detections) and (2) a **blow-up** event —
+every detection in the ±12 h window postdates onset (F4) — can each get their own notice
+banner, which a shared layer style cannot express. `active_is_blowup` is computed once in
+Python (`active_n_pixels_12h > 0 & active_n_before_onset_12h == 0`) rather than re-derived in
+JS, so the map and the attribute table can never disagree on which events are flagged.
+**Rejected:** styling blow-up fires differently in the always-on `act` layer — cannot show
+the "no data at all" case (empty geometry has no style to apply), and clutters the base map
+with a distinction only relevant when you're already looking at one specific event.
+
 ### D-20 — Analysis lives in a package, not in notebook string literals
 `make_notebook.py` emits the notebook; the logic sits in `pyrocb/` so it can be imported, tested,
 linted and profiled. The notebook narrates and calls it.
