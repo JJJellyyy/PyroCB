@@ -65,8 +65,27 @@ NFP_WINDOWS_H       = (6, 12, 24)
 # Active-burn polygon: NFP pixel footprints within +/- W hours of onset. Symmetric,
 # because the ~10 h nightly blind window means the run that fed the plume is usually
 # first seen by the overpass AFTER onset (FINDINGS F3).
-ACTIVE_WINDOWS_H    = (6, 12, 24)
-ACTIVE_HEADLINE_H   = 12
+# Active-burn window grid: (hours BEFORE onset, hours AFTER onset). The map slider
+# steps over this grid; the GeoPackage carries a polygon for every combination.
+# Asymmetric matters - a blow-up fire (F4) is only seen AFTER onset, so a pure-post
+# window is the honest choice there.
+ACTIVE_STEPS_H     = (0, 6, 12, 18, 24)
+ACTIVE_MIN_SPAN_H  = 6
+ACTIVE_WINDOWS     = tuple((a, b) for a in ACTIVE_STEPS_H for b in ACTIVE_STEPS_H
+                           if a + b >= ACTIVE_MIN_SPAN_H)      # 24 combinations
+ACTIVE_HEADLINE    = (12, 12)
+# Windows also written as columns in the attribute table: the headline gets the full
+# set of metrics, the rest just area + pixel count.
+ACTIVE_TABLE_WINDOWS = ((12, 12), (6, 6), (24, 24), (0, 24), (24, 0))
+
+# Localisation. NFP pixels in the window are unioned, near-neighbours bridged across
+# swath gaps, then only the cluster containing (or nearest, within the cap) the
+# pyroCb's own location is kept. Without this a fire that MERGES with a distant
+# neighbour later in the season drags that neighbour's pixels into the "active area",
+# because NFP `mergid` is the season-final id (FINDINGS F5). Measured: this drops
+# ~48% of in-window pixels across the matched-event set.
+ACTIVE_BRIDGE_M      = 1500.0
+ACTIVE_ATTACH_CAP_KM = 20.0
 
 # Map scope. True -> the map carries only fires credited with a pyroCb (and their
 # ignitions), which is the analysis population; False -> every tracked fire, which is

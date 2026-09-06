@@ -345,20 +345,26 @@ for y in YEARS:
     # "Blew up before it was ever observed": the +/-12h active-burn window has
     # detections, but every one of them comes from the overpass AFTER onset - the fire
     # existed and was already burning, it just wasn't seen until the next look (F4).
-    # Flagged so the map can say so explicitly rather than silently using post-onset
-    # pixels as if they were "the fire at onset".
-    if "active_n_pixels_12h" in pg.columns:
-        pg["active_is_blowup"] = ((pg["active_n_pixels_12h"] > 0)
-                                   & (pg["active_n_before_onset_12h"] == 0))
+    if "active_n_pixels_pre12_post12" in pg.columns:
+        pg["active_is_blowup"] = ((pg["active_n_pixels_pre12_post12"] > 0)
+                                   & (pg["active_n_before_onset_pre12_post12"] == 0))
+
+    # Slider / animation data: one localisation pass gives the 24-window area lookup
+    # and the per-detection table the map filters by time.
+    agrid, px = active.slider_data(y, ev_y) if len(ev_y) else ({}, pd.DataFrame())
+    if agrid:
+        pg["agrid"] = pg["pcb_id"].map(agrid)
 
     pg = pg[[c for c in ("pcb_id", "datetime", "doy", "fire_name", "region", "status",
                          "max_inject_alt", "trop_relative_alt", "pcb_min_bt", "mergid",
                          "match_method", "match_dist_km", "pcb_index", "n_pcb_total",
                          "n_pcb_before", "n_pcb_after", "n_ign_total", "area_pre_km2",
                          "area_post_km2", "frac_burned_before", "obs_lag_h",
-                         "active_area_km2_12h", "active_n_pixels_12h", "active_n_obs_12h",
-                         "active_n_before_onset_12h", "active_n_after_onset_12h",
-                         "active_frp_p95_12h", "active_is_blowup", "geometry")
+                         "active_area_km2_pre12_post12", "active_n_pixels_pre12_post12",
+                         "active_n_obs_pre12_post12", "active_n_before_onset_pre12_post12",
+                         "active_n_after_onset_pre12_post12", "active_frp_p95_pre12_post12",
+                         "active_detach_km_pre12_post12", "active_is_blowup", "agrid",
+                         "geometry")
                 if c in pg.columns]]
 
     # Fires credited with a pyroCb, for the "only fires with a pyroCb" filter.
@@ -392,23 +398,38 @@ for y in YEARS:
         b64["bnd"], _, _ = pack({"type": "FeatureCollection", "features": []})
 
     ag = active_geom.get(y)
+    hp, ho = C.ACTIVE_HEADLINE
     if ag is not None and len(ag):
-        ag = ag[ag.window_h == C.ACTIVE_HEADLINE_H].copy()
+        ah = ag[(ag.pre_h == hp) & (ag.post_h == ho)].copy()
         # +/- 200 m closes the ~375 m pixel lattice into solid blobs before simplifying.
-        ag["geometry"] = smooth_for_map(ag.geometry, 200.0, 150.0)
-        ag = gpd.GeoDataFrame(ag, geometry="geometry", crs=C.METRIC_CRS).to_crs(C.WGS84)
-        ag = ag[~ag.geometry.is_empty & ag.geometry.notna()]
-        ag["doy"] = pd.to_datetime(ag["datetime"]).dt.dayofyear
-        ag["datetime"] = pd.to_datetime(ag["datetime"]).dt.strftime("%Y-%m-%d %H:%M")
-        for c in ("t_first", "t_last"):
-            ag[c] = pd.to_datetime(ag[c]).dt.strftime("%Y-%m-%d %H:%M")
-        b64["act"], _, _ = pack(json.loads(ag.to_json(drop_id=True)))
+        ah["geometry"] = smooth_for_map(ah.geometry, 200.0, 150.0)
+        ah = gpd.GeoDataFrame(ah, geometry="geometry", crs=C.METRIC_CRS).to_crs(C.WGS84)
+        ah = ah[~ah.geometry.is_empty & ah.geometry.notna()]
+        ah["doy"] = pd.to_datetime(ah["datetime"]).dt.dayofyear
+        for c in ("datetime", "t_first", "t_last"):
+            ah[c] = pd.to_datetime(ah[c]).dt.strftime("%Y-%m-%d %H:%M")
+        b64["act"], _, _ = pack(json.loads(ah.to_json(drop_id=True)))
     else:
         b64["act"], _, _ = pack({"type": "FeatureCollection", "features": []})
 
+    # Per-detection pixels (widest window, localised) -> the map's slider / animation.
+    pixobj = {}
+    for pid, gg in px.groupby("pcb_id"):
+        olat, olon = round(float(gg.lat.mean()), 4), round(float(gg.lon.mean()), 4)
+        pixobj[pid] = {
+            "o": [olat, olon],
+            "dlat": ((gg.lat - olat) * 1e5).round().astype(int).tolist(),   # ~1.1 m
+            "dlon": ((gg.lon - olon) * 1e5).round().astype(int).tolist(),
+            "hw": gg.hw.round().astype(int).tolist(),
+            "hh": gg.hh.round().astype(int).tolist(),
+            "t": gg.t_rel_h.round(2).tolist(),
+        }
+    b64["pix"], _, gpx = pack(pixobj)
+
     payloads[y] = b64
     print(f"  {y}: {len(per_out):>6} perims  {len(ign_out):>6} ignitions  {len(pg):>3} pyroCb"
-          f"  {0 if bg is None else len(bg):>3} bands   packed {(gp+gi)/1e6:5.2f} MB", flush=True)
+          f"  {0 if bg is None else len(bg):>3} bands  {len(px):>6} px"
+          f"   packed {(gp+gi+gpx)/1e6:5.2f} MB", flush=True)
 
 # Fit the DOY window to the whole dataset, weighted by BURNED AREA. Weighting matters:
 # an unweighted percentile over fire counts is dragged to (16, 349) by tiny January crop
@@ -498,14 +519,35 @@ HTML = """<!DOCTYPE html>
   #notice.info{background:#e7f1ff;color:#084298;border-color:#9ec5fe}
   #notice b{display:block;margin-bottom:2px}
   #notice .x{float:right;cursor:pointer;font-weight:700;margin-left:8px}
-  .active-hl{animation:hlpulse 1.1s ease-in-out infinite alternate}
-  @keyframes hlpulse{from{stroke-opacity:.55}to{stroke-opacity:1}}
+  #info{position:absolute;z-index:9998;left:12px;bottom:12px;width:310px;max-height:70vh;
+        overflow:auto;background:#fff;border:1px solid #ccc;border-radius:8px;
+        box-shadow:0 2px 12px rgba(0,0,0,.3);font:12px/1.45 system-ui;display:none}
+  #info .hd{background:#222;color:#fff;padding:7px 10px;border-radius:7px 7px 0 0;
+        font-weight:700;position:relative}
+  #info .hd .x{position:absolute;right:8px;top:6px;cursor:pointer;font-weight:700}
+  #info .bd{padding:8px 10px}
+  #info table{border-collapse:collapse;width:100%}
+  #info td{padding:1px 6px 1px 0;vertical-align:top}
+  #info .sl{margin:8px 0 4px;padding-top:6px;border-top:1px solid #eee}
+  #info .sl label{display:flex;align-items:center;gap:6px;margin:3px 0}
+  #info .sl input[type=range]{flex:1}
+  #info .rd{font-weight:700;margin-top:4px}
+  #info .warn{color:#8a5a00}
+  #info .seg{display:inline-flex;gap:0;margin:2px 0 2px 6px;vertical-align:middle}
+  #info .seg button,#info #lp10,#info #play{border:1px solid #bbb;background:#f7f7f7;
+     padding:2px 7px;font:11px system-ui;cursor:pointer}
+  #info .seg button:first-child{border-radius:4px 0 0 4px}
+  #info .seg button:last-child{border-radius:0 4px 4px 0;border-left:none}
+  #info .seg button.on{background:#333;color:#fff;border-color:#333}
+  #info #lp10{border-radius:0 4px 4px 0;border-left:none}
+  #info #play{border-radius:4px}
 </style>
 </head>
 <body>
 <div id="map"></div>
 <div id="busy">Loading&hellip;</div>
 <div id="notice"></div>
+<div id="info"></div>
 <script>
 const DATA=__DATA__, YEARS=__YEARS__, YCOL=__COLORS__, RAMP=__RAMP__;
 const DOY0=__DOY0__, DOY1=__DOY1__, ORPHAN_KM=__ORPHAN__;
@@ -528,41 +570,165 @@ function showNotice(kind, html){
 }
 function hideNotice(){ noticeEl.style.display = "none"; }
 
-// pyroCb -> its active-burn GeoJSON feature (raw, not a layer), keyed by the globally
-// unique pcb_id so a click works regardless of which years are currently toggled on.
-const byPcbActive = {};
+// pyroCb -> its per-detection pixels (widest window, localised to the fire that made
+// the pyroCb), keyed by the globally unique pcb_id so a click works no matter which
+// years are toggled on. Each entry: {o:[lat,lon], dlat:[], dlon:[], hw:[], hh:[], t:[]}.
+const byPcbPix = {};
 let highlightLayer = null;
 function clearHighlight(){
   if (highlightLayer){ map.removeLayer(highlightLayer); highlightLayer = null; }
 }
-function hasGeom(ft){
-  return !!(ft && ft.geometry && ft.geometry.coordinates && ft.geometry.coordinates.length);
+const DEG = 111320;   // metres per degree latitude (good enough at 45-72N for 375 m boxes)
+
+// Detections of one event with onset-relative time in [loH, hiH], as box features.
+function pixWindow(pid, loH, hiH){
+  const d = byPcbPix[pid];
+  if (!d) return {fc:{type:"FeatureCollection",features:[]}, n:0, nb:0};
+  const [olat, olon] = d.o, feats = [];
+  let nb = 0;
+  for (let i = 0; i < d.t.length; i++){
+    const th = d.t[i];
+    if (th < loH || th > hiH) continue;
+    if (th < 0) nb++;
+    const lat = olat + d.dlat[i]/1e5, lon = olon + d.dlon[i]/1e5;
+    const dlat = d.hh[i]/DEG, dlon = d.hw[i]/(DEG*Math.cos(lat*Math.PI/180));
+    feats.push({type:"Feature", properties:{}, geometry:{type:"Polygon", coordinates:[[
+      [lon-dlon,lat-dlat],[lon+dlon,lat-dlat],[lon+dlon,lat+dlat],
+      [lon-dlon,lat+dlat],[lon-dlon,lat-dlat]]]}});
+  }
+  return {fc:{type:"FeatureCollection", features:feats}, n:feats.length, nb};
 }
-// Click a pyroCb marker -> highlight the active-burn area (VIIRS detections within
-// +/-12 h of onset) it was matched to, and flag the two cases worth knowing about:
-// no detections at all in the window, or (F4) a fire that blew up before it was ever
-// observed, where every detection in the window comes from AFTER onset.
-function showActiveHighlight(p){
-  clearHighlight();
-  const ft = byPcbActive[p.pcb_id];
-  const got = hasGeom(ft);
-  if (p.active_is_blowup){
-    showNotice("warn", `<b>&#9888; Blow-up fire</b> No VIIRS detections before onset within `
-      +`&plusmn;12 h &mdash; this fire was first observed by the overpass <i>after</i> the `
-      +`pyroCb (see FINDINGS F4). The highlighted area uses those post-onset detections; it is `
-      +`not the true pre-onset state.`);
-  } else if (!got){
-    showNotice("info", `<b>No active-burn area</b> No VIIRS detections within &plusmn;12 h `
-      +`of this pyroCb.`);
+
+const HL_STYLE = {stroke:false, fillColor:"#ff9800", fillOpacity:0.5};
+// Draw/replace the highlight for [loH,hiH]. reuse=true keeps the same layer (animation).
+function drawPix(pid, loH, hiH, {fit=false, reuse=false}={}){
+  const {fc, n, nb} = pixWindow(pid, loH, hiH);
+  if (!reuse || !highlightLayer){
+    clearHighlight();
+    highlightLayer = L.geoJSON(fc, {pane:"hl", renderer:R.hl, style:()=>HL_STYLE}).addTo(map);
   } else {
-    hideNotice();
+    highlightLayer.clearLayers(); highlightLayer.addData(fc);
   }
-  if (got){
-    highlightLayer = L.geoJSON(ft, {pane:"hl",
-      style: () => ({color:"#ff9800", weight:4, fillColor:"#ff9800", fillOpacity:0.42})
-    }).addTo(map);
-    try { map.fitBounds(highlightLayer.getBounds().pad(0.4), {maxZoom:11}); } catch(e){}
-  }
+  if (fit && n){ try { map.fitBounds(highlightLayer.getBounds().pad(0.5), {maxZoom:11}); } catch(e){} }
+  return {n, nb};
+}
+
+// Static wrapper used by popup mode and the panel's Static tab.
+function renderActiveWindow(p, pre, post){
+  const {n, nb} = drawPix(p.pcb_id, -pre, post, {fit:true});
+  if (p.active_is_blowup){
+    showNotice("warn", `<b>&#9888; Blow-up fire</b> No VIIRS detections before onset &mdash; `
+      +`first seen by the overpass <i>after</i> the pyroCb (FINDINGS F4). This is post-onset burning.`);
+  } else if (!n){
+    showNotice("info", `<b>No detections</b> in the &minus;${pre} h &hellip; +${post} h window.`);
+  } else { hideNotice(); }
+  return {n, nb};
+}
+
+// ---- bottom-left detail panel: static window slider + animation --------
+let DETAIL_MODE = "panel";            // "panel" | "popup"
+let PANEL_MODE  = "static";           // "static" | "animate"
+let winPre = 12, winPost = 12;        // sticky; grid {0,6,12,18,24}, sum >= 6
+let loopSec = 5, animStyle = "cumulative";   // "cumulative" | "sliding"
+const SLIDE_W = 6;                    // sliding-window width, hours
+const infoEl = document.getElementById("info");
+let animReq = null, animT0 = 0;
+function stopAnim(){ if (animReq){ cancelAnimationFrame(animReq); animReq = null; } }
+function closeInfo(){ stopAnim(); infoEl.style.display = "none"; clearHighlight(); hideNotice(); }
+
+function openInfoPanel(p){
+  stopAnim();
+  const dt = [
+    ["Date/time (UTC)",p.datetime],["Region",p.region],["Fire (mergid)",p.mergid],
+    ["pyroCb # on fire",p.pcb_index+" of "+p.n_pcb_total],
+    ["Match",p.match_method+(p.match_dist_km!=null?` (${p.match_dist_km} km)`:"")],
+    ["Fraction burned before",p.frac_burned_before],["Obs lag (h)",p.obs_lag_h],
+  ];
+  const seg = (id,a,b) => `<div class="seg"><button id="${id}A" class="on">${a}</button>`
+    +`<button id="${id}B">${b}</button></div>`;
+  infoEl.innerHTML =
+    `<div class="hd">${esc(p.pcb_id)}<span class="x" title="close">&times;</span></div>`
+    +`<div class="bd"><div style="color:#666;margin-bottom:3px">${esc(p.fire_name||"unnamed fire")}`
+    +(p.active_is_blowup?` &nbsp;<span class="warn">&#9888;&#65039; blow-up</span>`:"")
+    +`</div><table>${rows(dt)}</table>`
+    +`<div class="sl"><b>Active burn</b> ${seg("pm","Static","Animate")}`
+    +`<div id="paneStatic">`
+      +`<label>before <input type="range" id="slPre" min="0" max="24" step="6" value="${winPre}">`
+      +`<span id="lbPre">${winPre}</span> h</label>`
+      +`<label>after &nbsp;<input type="range" id="slPost" min="0" max="24" step="6" value="${winPost}">`
+      +`<span id="lbPost">${winPost}</span> h</label></div>`
+    +`<div id="paneAnim" hidden>`
+      +`<label><button id="play">&#9654; Play</button>`
+      +`<span id="cur" style="margin-left:6px;font-weight:700"></span></label>`
+      +`<div style="height:6px;background:#eee;border-radius:3px;margin:3px 0">`
+        +`<div id="bar" style="height:6px;width:0;background:#ff9800;border-radius:3px"></div></div>`
+      +`<label>loop ${seg("lp","3 s","5 s")}<button id="lp10" style="margin-left:0">10 s</button></label>`
+      +`<label>${seg("as","Cumulative","Sliding "+SLIDE_W+" h")}</label></div>`
+    +`<div class="rd" id="rd"></div>`
+    +`<div style="color:#666;font-size:11px">Orange = VIIRS detections, localised to this fire.</div>`
+    +`</div></div>`;
+  infoEl.style.display = "block";
+  infoEl.querySelector(".x").onclick = closeInfo;
+
+  const $ = id => infoEl.querySelector(id);
+  const rd = $("#rd");
+  const setReadout = (loH, hiH, n, nb) => {
+    let km2 = null;
+    if (loH === -winPre && hiH === winPost) km2 = (p.agrid||{})[winPre+"_"+winPost];
+    rd.innerHTML = n
+      ? `${km2!=null?km2.toFixed(1)+" km&sup2; &middot; ":""}${n} detections `
+        +`(${nb} before / ${n-nb} after onset)`
+      : `no detections in this window`;
+  };
+
+  // static
+  const slPre = $("#slPre"), slPost = $("#slPost");
+  const applyStatic = src => {
+    let a = +slPre.value, b = +slPost.value;
+    if (a + b < 6){ if (src==="pre") b = 6 - a; else a = 6 - b; slPre.value=a; slPost.value=b; }
+    winPre = a; winPost = b;
+    $("#lbPre").textContent = a; $("#lbPost").textContent = b;
+    const {n, nb} = renderActiveWindow(p, a, b);
+    setReadout(-a, b, n, nb);
+  };
+  slPre.oninput = () => applyStatic("pre");
+  slPost.oninput = () => applyStatic("post");
+
+  // animate
+  const frame = ts => {
+    if (!animT0) animT0 = ts;
+    const u = ((ts - animT0) / (loopSec*1000)) % 1;      // 0..1 loop position
+    const cur = -24 + 48*u;                               // cursor hour
+    const loH = animStyle==="cumulative" ? -24 : cur - SLIDE_W;
+    const {n, nb} = drawPix(p.pcb_id, loH, cur, {reuse:true});
+    $("#cur").textContent = (cur>=0?"+":"") + cur.toFixed(1) + " h";
+    $("#bar").style.width = (u*100).toFixed(1) + "%";
+    setReadout(null, null, n, nb);
+    animReq = requestAnimationFrame(frame);
+  };
+  const playBtn = $("#play");
+  playBtn.onclick = () => {
+    if (animReq){ stopAnim(); playBtn.innerHTML = "&#9654; Play"; }
+    else { animT0 = 0; playBtn.innerHTML = "&#10073;&#10073; Pause"; animReq = requestAnimationFrame(frame); }
+  };
+  const pair = (aId,bId,set,va,vb) => {
+    $(aId).onclick = () => { set(va); $(aId).classList.add("on"); $(bId).classList.remove("on"); };
+    $(bId).onclick = () => { set(vb); $(bId).classList.add("on"); $(aId).classList.remove("on"); };
+  };
+  pair("#lpA","#lpB", v=>{loopSec=v; animT0=0;}, 3, 5);
+  $("#lp10").onclick = () => { loopSec=10; animT0=0;
+    $("#lpA").classList.remove("on"); $("#lpB").classList.remove("on"); };
+  pair("#asA","#asB", v=>{animStyle=v;}, "cumulative", "sliding");
+
+  $("#pmA").onclick = () => { PANEL_MODE="static"; stopAnim(); playBtn.innerHTML="&#9654; Play";
+    $("#pmA").classList.add("on"); $("#pmB").classList.remove("on");
+    $("#paneStatic").hidden=false; $("#paneAnim").hidden=true; applyStatic(); };
+  $("#pmB").onclick = () => { PANEL_MODE="animate";
+    $("#pmB").classList.add("on"); $("#pmA").classList.remove("on");
+    $("#paneStatic").hidden=true; $("#paneAnim").hidden=false;
+    drawPix(p.pcb_id, -24, 24, {fit:true, reuse:false}); };
+
+  (PANEL_MODE==="animate" ? $("#pmB") : $("#pmA")).onclick();
 }
 
 // ---- colour ---------------------------------------------------------------
@@ -604,6 +770,7 @@ PANES.forEach((k,i)=>{ map.createPane(k); map.getPane(k).style.zIndex = 410+i*10
 map.createPane("ignlbl"); map.getPane("ignlbl").style.zIndex = 445;   // stars: above bands, below pyroCb
 map.createPane("lbl"); map.getPane("lbl").style.zIndex = 470;
 map.createPane("hl");  map.getPane("hl").style.zIndex = 480;          // active-burn highlight: on top of all
+R.hl = L.canvas({pane:"hl"});
 
 const ALL = ["per","act","bnd","ign","pcb","pcbC","orp"];
 const cache = {}, byFire = {};
@@ -643,23 +810,25 @@ function buildLayers(y, gj){
                : L.circleMarker(ll,{pane:"pcb",renderer:R.pcb,radius:6,color:"#111",
                    weight:1.5,fillColor:hueOf(y,ft),fillOpacity:1});},
     onEachFeature:(ft,l)=>{const p=ft.properties;
-      l.bindPopup(`<b>${esc(p.pcb_id)}</b><br>${esc(p.fire_name||"unnamed")}`
-        +(p.active_is_blowup?` <span title="Blew up before it was ever observed">&#9888;&#65039;</span>`:"")
-        +`<table>${rows([
-        ["Date/time (UTC)",p.datetime],["Region",p.region],["Day of year",p.doy],
-        ["Max injection alt (m)",p.max_inject_alt],["Rel. tropopause (m)",p.trop_relative_alt],
-        ["Min BT (°C)",p.pcb_min_bt],["Match",p.match_method],["Dist. to fire (km)",p.match_dist_km],
-        ["Fire (mergid)",p.mergid],["pyroCb # on this fire",p.pcb_index+" of "+p.n_pcb_total],
-        ["pyroCb before / after",p.n_pcb_before+" / "+p.n_pcb_after],
-        ["Ignitions in complex",p.n_ign_total],
-        ["Area before (km²)",p.area_pre_km2],["Area after (km²)",p.area_post_km2],
-        ["Fraction burned before",p.frac_burned_before],
-        ["Obs lag (h)",p.obs_lag_h],
-        ["Active burn &plusmn;12h (km²)",p.active_area_km2_12h],
-        ["Active-burn detections",p.active_n_pixels_12h],
-        ["  before / after onset",p.active_n_before_onset_12h+" / "+p.active_n_after_onset_12h],
-        ["Blew up before observed",p.active_is_blowup?"yes — see notice":""]])}</table>`);
-      l.on("click", () => showActiveHighlight(p));}
+      if (DETAIL_MODE==="popup"){
+        l.bindPopup(`<b>${esc(p.pcb_id)}</b><br>${esc(p.fire_name||"unnamed")}`
+          +(p.active_is_blowup?` <span title="Blew up before it was ever observed">&#9888;&#65039;</span>`:"")
+          +`<table>${rows([
+          ["Date/time (UTC)",p.datetime],["Region",p.region],["Day of year",p.doy],
+          ["Max injection alt (m)",p.max_inject_alt],["Rel. tropopause (m)",p.trop_relative_alt],
+          ["Min BT (°C)",p.pcb_min_bt],["Match",p.match_method],["Dist. to fire (km)",p.match_dist_km],
+          ["Fire (mergid)",p.mergid],["pyroCb # on this fire",p.pcb_index+" of "+p.n_pcb_total],
+          ["pyroCb before / after",p.n_pcb_before+" / "+p.n_pcb_after],
+          ["Ignitions in complex",p.n_ign_total],
+          ["Area before (km²)",p.area_pre_km2],["Area after (km²)",p.area_post_km2],
+          ["Fraction burned before",p.frac_burned_before],["Obs lag (h)",p.obs_lag_h],
+          ["Active burn ±12h (km²)",p.active_area_km2_pre12_post12],
+          ["Active-burn detections",p.active_n_pixels_pre12_post12],
+          ["  before / after onset",p.active_n_before_onset_pre12_post12+" / "+p.active_n_after_onset_pre12_post12],
+          ["Blew up before observed",p.active_is_blowup?"yes":""]])}</table>`);
+      }
+      l.on("click", () => DETAIL_MODE==="panel" ? openInfoPanel(p)
+                                               : renderActiveWindow(p, 12, 12));}
   });
   const bndOpts = {
     pane:"bnd", renderer:R.bnd,
@@ -686,18 +855,19 @@ function buildLayers(y, gj){
   };
   const bndLayerStyle = l => l.setStyle(bndOpts.style(l.feature));
 
-  // Active burn area: union of VIIRS pixel footprints within +/-12 h of onset. This is
-  // the polygon the land-cover and ERA5 covariates get sampled over, so it is drawn as a
-  // bright outline on top rather than a fill - you need to see what it covers.
+  // Active burn area: localised union of VIIRS pixel footprints from -12 h to +12 h of
+  // onset - the polygon land-cover and ERA5 covariates get sampled over. Drawn as a
+  // bright outline; click a pyroCb to scrub the window with the slider.
   const actOpts = {
     pane:"act", renderer:R.act,
     style: ft => ({color:"#00e5ff", weight:1.6, fill:true, fillColor:"#00e5ff",
                    fillOpacity:0.18, dashArray:"4 3"}),
     onEachFeature:(ft,l)=>{const p=ft.properties;
-      byPcbActive[p.pcb_id] = ft;
-      l.bindPopup(`<b>Active burn at onset &plusmn;${p.window_h} h</b><br>${esc(p.pcb_id)}<table>${rows([
+      l.bindPopup(`<b>Active burn, &minus;${p.pre_h} h &hellip; +${p.post_h} h</b><br>`
+        +`${esc(p.pcb_id)}<table>${rows([
         ["Fire (mergid)",p.mergid],["Onset (UTC)",p.datetime],
-        ["Active area (km²)",p.area_km2],["Raw pixel footprint (km²)",p.footprint_km2],
+        ["Active area (km²)",p.area_km2],
+        ["Detached from pyroCb (km)",p.detach_km],["Clusters in window",p.n_clusters],
         ["VIIRS detections",p.n_pixels],["Distinct overpasses",p.n_obs],
         ["Detections before / after onset",p.n_before_onset+" / "+p.n_after_onset],
         ["FRP p95 (MW)",p.frp_p95],["First / last obs",p.t_first+" → "+p.t_last]])}</table>`);}
@@ -735,7 +905,9 @@ function wanted(){
 async function ensureYear(y){
   if (cache[y]) return cache[y];
   const d = DATA[y];
-  const [per,ign,pcb,bnd,act] = await Promise.all([d.per,d.ign,d.pcb,d.bnd,d.act].map(unpack));
+  const [per,ign,pcb,bnd,act,pix] = await Promise.all(
+    [d.per,d.ign,d.pcb,d.bnd,d.act,d.pix].map(unpack));
+  Object.assign(byPcbPix, pix);          // pcb_id -> per-detection arrays
   cache[y] = buildLayers(y,{per,ign,pcb,bnd,act});
   return cache[y];
 }
@@ -744,7 +916,7 @@ let refreshing=false, pending=false;
 async function refresh(){
   if (refreshing){ pending=true; return; }
   refreshing=true;
-  clearHighlight(); hideNotice();
+  if (infoEl.style.display !== "block"){ clearHighlight(); hideNotice(); }
   do {
     pending=false;
     const need = YEARS.filter(y=>activeYears.has(y) && !cache[y]);
@@ -816,7 +988,10 @@ panel.onAdd = () => {
     <div class="layers">
       <label><input type="checkbox" id="hideOrp"> Hide unmatched pyroCb</label>
     </div>
-    <div class="sub" style="margin-top:6px">Click a pyroCb to highlight its active-burn area.</div>`;
+    <div class="layers"><b style="font-size:11px">pyroCb click</b>
+      <div class="seg"><button id="dPanel" class="on">Info panel</button><button id="dPopup">Popup</button></div>
+      <div class="sub">Click a pyroCb: panel (bottom-left) with an active-burn window slider,
+      or a popup on the marker.</div></div>`;
   L.DomEvent.disableClickPropagation(d); L.DomEvent.disableScrollPropagation(d);
   d.querySelectorAll(".chip").forEach(c=>c.onclick=()=>{
     const y=+c.dataset.year; activeYears.has(y)?activeYears.delete(y):activeYears.add(y); refresh();});
@@ -828,8 +1003,34 @@ panel.onAdd = () => {
   const my=d.querySelector("#mYear"), mdy=d.querySelector("#mDoy");
   my.onclick  = ()=>{MODE="year"; my.classList.add("on"); mdy.classList.remove("on"); recolour();};
   mdy.onclick = ()=>{MODE="doy";  mdy.classList.add("on"); my.classList.remove("on"); recolour();};
+  const dp=d.querySelector("#dPanel"), du=d.querySelector("#dPopup");
+  dp.onclick = ()=>{DETAIL_MODE="panel"; dp.classList.add("on"); du.classList.remove("on");
+    Object.keys(cache).forEach(y=>cache[y].pcb.eachLayer(l=>l.unbindPopup&&l.unbindPopup()));};
+  du.onclick = ()=>{DETAIL_MODE="popup"; du.classList.add("on"); dp.classList.remove("on");
+    closeInfo();
+    Object.keys(cache).forEach(y=>rebindPopups(y));};
   return d;
 };
+
+// Re-attach pyroCb popups after a switch to "popup" mode (they are only bound at
+// build time when the mode is already "popup").
+function rebindPopups(y){
+  const c = cache[y]; if (!c) return;
+  c.pcb.eachLayer(l=>{
+    const p = l.feature.properties;
+    l.bindPopup(`<b>${esc(p.pcb_id)}</b><br>${esc(p.fire_name||"unnamed")}`
+      +(p.active_is_blowup?` <span title="blew up before observed">&#9888;&#65039;</span>`:"")
+      +`<table>${rows([
+      ["Date/time (UTC)",p.datetime],["Region",p.region],["Fire (mergid)",p.mergid],
+      ["pyroCb # on fire",p.pcb_index+" of "+p.n_pcb_total],
+      ["Match",p.match_method],["Dist. to fire (km)",p.match_dist_km],
+      ["Fraction burned before",p.frac_burned_before],["Obs lag (h)",p.obs_lag_h],
+      ["Active burn ±12h (km²)",p.active_area_km2_pre12_post12],
+      ["Active-burn detections",p.active_n_pixels_pre12_post12],
+      ["  before / after onset",p.active_n_before_onset_pre12_post12+" / "+p.active_n_after_onset_pre12_post12]
+      ])}</table>`);
+  });
+}
 panel.addTo(map);
 
 const legend = L.control({position:"bottomright"});

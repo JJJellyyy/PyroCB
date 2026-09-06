@@ -7,6 +7,40 @@ Rationale for each choice lives in [DECISIONS.md](DECISIONS.md); data discoverie
 
 ---
 
+## v0.9 — 2026-09-06 — active burn localised, window slider + animation
+
+### Fixed
+* **Active-burn area was several fires, not one.** `NFP.mergid` is the season-final id, so a
+  big fire's detections already include every neighbour that merged into it later; a ±12 h
+  *time* filter did nothing about that. For the six largest 2023 pyroCb fires the "active
+  area" spanned 130–210 km with the median detection 22–121 km from the pyroCb. Now the
+  in-window detections are clustered and only the one at the pyroCb is kept
+  (`active._localise`, KD-tree connected components). Headline active area: median 92 → **31
+  km²**, max 15,000+ → **1,280 km²**; ~48 % of in-window pixels were dropped as detached.
+  New columns `active_detach_km_*`, `n_clusters`. See FINDINGS F12.
+
+### Added
+* **Active-burn window slider.** Click a pyroCb → the bottom-left panel carries independent
+  *before* / *after* sliders over {0, 6, 12, 18, 24} h (min 6 h total). The map redraws the
+  VIIRS detections in that window live; the readout shows area (24-window lookup, rasterised
+  server-side) and the before/after detection split.
+* **Animation mode.** A Static / Animate toggle in the same panel. Animate sweeps a time
+  cursor −24 h → +24 h on a 3 / 5 / 10 s loop, either **cumulative** (the fire growing from
+  −24 h) or a **sliding 6 h window** (the front moving). Pure client-side from the shipped
+  per-detection pixels — no extra payload.
+* **Bottom-left detail panel** replaces the marker popup by default (toggle back to popups
+  in the control panel).
+* `active_area_km2_*` now for asymmetric windows `pre{A}_post{B}`; the GeoPackage carries the
+  five in `ACTIVE_TABLE_WINDOWS` (12/12, 6/6, 24/24, 0/24 for blow-ups, 24/0).
+
+### Changed
+* `active.py` reworked: one localisation pass per event, shared by the polygons, the
+  24-window area grid and the pixel export (`active.slider_data`).
+* `make_notebook.py` now aborts if a generated code cell fails to `ast.parse` — a `"""` in a
+  `code(r"""…""")` block has truncated the notebook twice.
+
+---
+
 ## v0.8 — 2026-09-04 — click-to-highlight active burn area, blow-up flag
 
 ### Added

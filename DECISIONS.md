@@ -192,6 +192,29 @@ JS, so the map and the attribute table can never disagree on which events are fl
 the "no data at all" case (empty geometry has no style to apply), and clutters the base map
 with a distinction only relevant when you're already looking at one specific event.
 
+### D-29 — Localise the active-burn area to the pyroCb's own fire cluster
+The window filter is on `NFP.mergid`, which is the season-final id, so it silently includes
+every fire that merged in later (F12). After the time filter the detections are clustered and
+only the one holding the pyroCb (or the nearest within `ACTIVE_ATTACH_CAP_KM`, for the
+0.1°-rounded location landing in a gap) is kept. Clustering is a KD-tree connected-component
+join, not a shapely buffer/unbuffer — the latter over thousands of parts was the runtime.
+**Rejected:** using the onset snapshot polygon as the spatial mask — it is *also* dissolved by
+the final `mergid`, so for the merge cases it is the same over-large blob.
+
+### D-30 — The map slider ships pixels, not 24 polygons
+Independent before/after sliders imply 24 (pre,post) windows. Precomputing a smoothed polygon
+for each, per event, is ~90 MB and half an hour of `union_all`. Instead the map ships the
+localised per-detection footprints once (~1 MB gz for all years) and the client draws the
+boxes for whatever window — or animation frame — is showing. Exact union polygons are kept
+only for the five `ACTIVE_TABLE_WINDOWS` (GeoPackage + `act` layer); the slider's area readout
+uses a 100 m rasterised area (sub-percent error).
+**Rejected:** turf.js `union` in the browser — too slow to run on every slider tick.
+
+### D-31 — Animation is a client-side sweep, not pre-rendered frames
+"Active-area GIF" = a `requestAnimationFrame` loop moving a time cursor over the same shipped
+pixels, cumulative or sliding-window, 3/5/10 s loop. No frames, tiles or video in the payload;
+it reuses one Leaflet layer via `clearLayers()`/`addData()` so it stays smooth.
+
 ### D-20 — Analysis lives in a package, not in notebook string literals
 `make_notebook.py` emits the notebook; the logic sits in `pyrocb/` so it can be imported, tested,
 linted and profiled. The notebook narrates and calls it.

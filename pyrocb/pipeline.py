@@ -92,7 +92,9 @@ def _denorm(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def active_cached(year: int, events: pd.DataFrame):
-    params = {"win": list(C.ACTIVE_WINDOWS_H), "cap": C.MATCH_CAP_KM, "prec": C.PRECISION_M}
+    params = {"win": [list(w) for w in C.ACTIVE_TABLE_WINDOWS], "cap": C.MATCH_CAP_KM,
+              "prec": C.PRECISION_M, "bridge": C.ACTIVE_BRIDGE_M,
+              "attach": C.ACTIVE_ATTACH_CAP_KM}
     return C.cached("active", year, params, _inputs(year),
                     lambda: A.active_polygons(year, events), geo=True)
 
@@ -168,12 +170,14 @@ DICT = [
     ("snap_flinelen", "km", "Active fire-line length at match_step", "snapshot"),
     ("snap_meanFRP", "W/m2", "Area-normalised mean FRP at match_step", "snapshot"),
     ("snap_n_components", "-", "Snapshot rows sharing this mergid (un-executed merge components)", "snapshot"),
-    ("active_area_km2_12h", "km2", "ACTIVE BURN AREA: union of VIIRS pixel footprints within +/-12 h of onset. The sampling geometry for land cover / ERA5", "NFP"),
-    ("active_area_km2_6h / _24h", "km2", "Same at +/-6 h and +/-24 h, for sensitivity", "NFP"),
-    ("active_n_pixels_12h", "-", "Detections inside that window", "NFP"),
-    ("active_n_obs_12h", "-", "Distinct overpass times in the window; 1 means a single look", "NFP"),
-    ("active_n_before_onset_12h", "-", "Of those detections, how many precede onset", "NFP"),
-    ("active_frp_p95_12h", "MW", "95th percentile FRP of the active-burn pixels", "NFP"),
+    ("active_area_km2_pre12_post12", "km2", "ACTIVE BURN AREA: union of VIIRS pixel footprints from 12 h before to 12 h after onset, localised to the pyroCb's own fire cluster. The sampling geometry for land cover / ERA5", "NFP"),
+    ("active_area_km2_pre{A}_post{B}", "km2", "Same for other windows: pre6_post6, pre24_post24, pre0_post24 (pure post, for blow-ups), pre24_post0", "NFP"),
+    ("active_n_pixels_pre12_post12", "-", "Detections in the localised window", "NFP"),
+    ("active_n_obs_pre12_post12", "-", "Distinct overpass times in the window; 1 means a single look", "NFP"),
+    ("active_n_before_onset_pre12_post12", "-", "Of those detections, how many precede onset (0 => blow-up, see active_is_blowup)", "NFP"),
+    ("active_n_after_onset_pre12_post12", "-", "Of those detections, how many follow onset", "NFP"),
+    ("active_frp_p95_pre12_post12", "MW", "95th percentile FRP of the active-burn pixels", "NFP"),
+    ("active_detach_km_pre12_post12", "km", "Distance from the pyroCb location to the kept fire cluster; 0 if it sits inside one", "NFP"),
     ("match_fwd_steps", "-", "Overpasses searched AHEAD to find a fire that blew up before it was first observed; 0 normally", "derived"),
     ("fire_farea_km2", "km2", "Season-final fire area", "final perimeter"),
     ("fire_duration_days", "d", "Fire duration", "final perimeter"),
@@ -212,6 +216,7 @@ def export(events: pd.DataFrame, active=None, verbose: bool = True):
         a.to_file(C.OUT_ACTIVE, driver="GPKG", layer="active_burn")
         if verbose:
             nn = int(a.geometry.notna().sum())
+            nw = a.groupby(["pre_h", "post_h"]).ngroups
             print(f"  wrote {C.OUT_ACTIVE.name} ({len(a)} rows, {nn} with geometry, "
-                  f"{a.window_h.nunique()} windows)", flush=True)
+                  f"{nw} windows)", flush=True)
     return df

@@ -235,3 +235,38 @@ runs for the ten sound years. **Treat 2021 NFP-derived columns — the `n_pixels
 *Lesson worth keeping: the assertion earned its place. Without it, 2021 would have produced
 plausible-looking pixel counts and active-burn polygons that were silently attributed to the
 wrong fires.*
+
+---
+
+## F12. "Active burn area" was pulling in fires that only merged later
+
+**Believed:** filtering `NFP[mergid == fire] ` to ±12 h of onset gives the ground burning
+around the pyroCb.
+
+**Actually:** for a big fire it gave *several* fires. `NFP.mergid` is the season-**final**
+id (F5), so a fire's row set already contains every neighbour that merged into it weeks
+later. A narrow *time* filter does nothing about that — the neighbours were also burning
+that afternoon. Measured on the six largest 2023 pyroCb fires, ±12 h of onset:
+
+| event | detections | median dist to pyroCb | cloud diagonal |
+|---|---|---|---|
+| PCB_2023_0705_1940 | 470 | **121 km** | 211 km |
+| PCB_2023_0922_2020 | 4708 | 39 km | 198 km |
+| PCB_2023_0716_2220 | 3107 | 37 km | 128 km |
+
+`PCB_2023_0922_2020` is the clean case: 4 snapshot rows with 4 distinct `fireid`, `mergedate`
+**2023-09-23** — the day *after* the pyroCb. Four fires 48–123 km apart, dissolved into one
+because they eventually touched.
+
+There is also a second mechanism: `PCB_2023_0705_1940` is a *single* `fireid` the atlas tracks
+as one 9,448 km², 35-part blob spanning 200 km. Not a merge — just a sprawling complex.
+
+**Fix (`active._localise`).** After the time filter, cluster the detections (KD-tree
+connected components at `ACTIVE_BRIDGE_M` + a pixel diagonal) and keep only the cluster the
+pyroCb sits in — or the nearest within `ACTIVE_ATTACH_CAP_KM` if the 0.1°-rounded location
+lands in a gap. `n_clusters` and `detach_km` record what happened.
+
+Result across the matched set: **~48 % of in-window pixels dropped**; headline active area
+median 92 → **31 km²**, max 15,000+ → **1,280 km²**. `detach_km > 0` for 65 % of events
+(rounding puts the point just off a pixel; snap is usually < 1 km), `> 5 km` for only 27 —
+those are the genuinely weak localisations and are flagged.
