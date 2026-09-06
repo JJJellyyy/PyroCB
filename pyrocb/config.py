@@ -76,7 +76,9 @@ ACTIVE_WINDOWS     = tuple((a, b) for a in ACTIVE_STEPS_H for b in ACTIVE_STEPS_
 ACTIVE_HEADLINE    = (12, 12)
 # Windows also written as columns in the attribute table: the headline gets the full
 # set of metrics, the rest just area + pixel count.
-ACTIVE_TABLE_WINDOWS = ((12, 12), (6, 6), (24, 24), (0, 24), (24, 0))
+# (6, 0) is the "burn area in the 6 h before onset" polygon - the geometry the
+# pyroCb-info land-cover fractions are sampled over (LC_ACTIVE_WINDOW).
+ACTIVE_TABLE_WINDOWS = ((12, 12), (6, 6), (24, 24), (0, 24), (24, 0), (6, 0))
 
 # Localisation. NFP pixels in the window are unioned, near-neighbours bridged across
 # swath gaps, then only the cluster containing (or nearest, within the cap) the
@@ -97,6 +99,15 @@ LC_YEAR_SPLIT = 2018
 LC_CELL_M     = 1000.0
 LC_BUFFER_M   = 5000.0
 LC_SIMPLIFY_M = 2000.0
+# Coarse background land cover: away from the fires the map still shows land cover
+# rather than OpenStreetMap, but decimated hard so the browser copes. Drawn under
+# the 1 km fire layer, over the convex hull of the year's pyroCb fires + this collar.
+LC_BG_CELL_M     = 10000.0
+LC_BG_BUFFER_M   = 120000.0
+LC_BG_SIMPLIFY_M = 6000.0
+# The active-burn window whose land-cover composition is reported per pyroCb event
+# (top 3 classes + fractions) in the map's info panel: the 6 h before onset.
+LC_ACTIVE_WINDOW = (6, 0)
 
 # Map scope. True -> the map carries only fires credited with a pyroCb (and their
 # ignitions), which is the analysis population; False -> every tracked fire, which is

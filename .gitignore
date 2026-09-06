@@ -19,7 +19,8 @@
 /final_perims/
 /ignitions/
 *.zip
-*.tif                       # 30 m Canada land-cover rasters (~2 GB each)
+# 30 m Canada land-cover rasters (~2 GB each)
+*.tif
 
 # ---- derived, reproducible ---------------------------------------------
 /cache/

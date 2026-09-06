@@ -47,34 +47,101 @@ def _tif(year: int) -> str:
     return C.LC_TIF_2015 if year < C.LC_YEAR_SPLIT else C.LC_TIF_2020
 
 
-def landcover_layer(year: int, geoms_3979) -> gpd.GeoDataFrame:
-    """Dissolved [cls, geometry] land-cover polygons (WGS84) for the given fire
-    geometries (already in EPSG:3979), each grown by `LC_BUFFER_M`."""
-    cell, buf, simp = C.LC_CELL_M, C.LC_BUFFER_M, C.LC_SIMPLIFY_M
-    parts = []
-    with rasterio.open(_tif(year)) as r:
-        for g in geoms_3979:
-            bg = g.buffer(buf)
-            minx, miny, maxx, maxy = bg.bounds
-            ow = max(1, round((maxx - minx) / cell))
-            oh = max(1, round((maxy - miny) / cell))
-            a = r.read(1, window=from_bounds(minx, miny, maxx, maxy, r.transform),
-                       out_shape=(oh, ow), resampling=Resampling.mode,
-                       boundless=True, fill_value=0).astype("uint8")
-            tr = rasterio.transform.from_bounds(minx, miny, maxx, maxy, ow, oh)
-            m = rasterio.features.geometry_mask([bg], (oh, ow), tr, invert=True)
-            a = np.where(m, a, 0).astype("uint8")
-            for geom, val in rasterio.features.shapes(a, mask=a > 0, transform=tr):
-                v = int(val)
-                if v in LC_CLASSES:
-                    parts.append((v, shapely.geometry.shape(geom)))
+def _polygonise(r, clip_geom, cell, simp):
+    """Windowed, decimated (majority) read of `r` over `clip_geom`'s bounds, masked to
+    `clip_geom`, polygonised by class and dissolved. Returns list of (cls, geom) in 3979."""
+    minx, miny, maxx, maxy = clip_geom.bounds
+    ow = max(1, round((maxx - minx) / cell))
+    oh = max(1, round((maxy - miny) / cell))
+    a = r.read(1, window=from_bounds(minx, miny, maxx, maxy, r.transform),
+               out_shape=(oh, ow), resampling=Resampling.mode,
+               boundless=True, fill_value=0).astype("uint8")
+    tr = rasterio.transform.from_bounds(minx, miny, maxx, maxy, ow, oh)
+    m = rasterio.features.geometry_mask([clip_geom], (oh, ow), tr, invert=True)
+    a = np.where(m, a, 0).astype("uint8")
+    out = []
+    for geom, val in rasterio.features.shapes(a, mask=a > 0, transform=tr):
+        v = int(val)
+        if v in LC_CLASSES:
+            out.append((v, shapely.geometry.shape(geom).simplify(simp)))
+    return out
 
+
+def landcover_layer(year: int, geoms_3979) -> gpd.GeoDataFrame:
+    """Dissolved [cls, res, geometry] land-cover polygons (WGS84).
+
+    Two resolutions in one layer, distinguished by `res` (metres):
+      * `LC_CELL_M` (1 km) over each fire perimeter grown by `LC_BUFFER_M`;
+      * `LC_BG_CELL_M` (10 km) over the convex hull of all the fires + `LC_BG_BUFFER_M`,
+        with the fine footprints punched out, so the map shows land cover instead of
+        OpenStreetMap everywhere near the fires without shipping a national raster.
+    """
+    geoms_3979 = [g for g in geoms_3979 if g is not None and not g.is_empty]
+    if not geoms_3979:
+        return gpd.GeoDataFrame({"cls": [], "res": []},
+                                geometry=gpd.GeoSeries([], crs=C.WGS84))
+
+    fine_bg = [g.buffer(C.LC_BUFFER_M) for g in geoms_3979]
+    fine_union = shapely.union_all(fine_bg)
+    fine, coarse = [], []
+    with rasterio.open(_tif(year)) as r:
+        rbounds = shapely.box(*r.bounds)
+        for bg in fine_bg:
+            fine += [(v, g, C.LC_CELL_M) for v, g in
+                     _polygonise(r, bg, C.LC_CELL_M, C.LC_SIMPLIFY_M)]
+
+        # Coarse backdrop: a wide collar around EACH fire (never a hull over all of
+        # them - fires span the dateline, and EPSG:3979 is Canada-only, so a global
+        # hull would be a garbage megapolygon). Read per fire, clipped to the raster
+        # and with the 1 km footprints punched out.
+        for g in geoms_3979:
+            collar = g.buffer(C.LC_BG_BUFFER_M).difference(fine_union).intersection(rbounds)
+            if collar.is_empty:
+                continue
+            for v, poly in _polygonise(r, collar, C.LC_BG_CELL_M, C.LC_BG_SIMPLIFY_M):
+                p = poly.intersection(collar)
+                if not p.is_empty:
+                    coarse.append((v, p, C.LC_BG_CELL_M))
+
+    parts = coarse + fine   # coarse first so it dissolves/draws under the fine layer
+    parts = [(v, g, res) for v, g, res in parts if g is not None and not g.is_empty]
     if not parts:
-        return gpd.GeoDataFrame({"cls": []}, geometry=gpd.GeoSeries([], crs=C.WGS84))
-    gdf = gpd.GeoDataFrame({"cls": [p[0] for p in parts]},
+        return gpd.GeoDataFrame({"cls": [], "res": []},
+                                geometry=gpd.GeoSeries([], crs=C.WGS84))
+    gdf = gpd.GeoDataFrame({"cls": [p[0] for p in parts], "res": [int(p[2]) for p in parts]},
                            geometry=[p[1] for p in parts], crs=3979)
-    diss = gdf.dissolve("cls").reset_index()
-    diss["geometry"] = diss.geometry.simplify(simp)
+    diss = gdf.dissolve(["res", "cls"]).reset_index()
     diss = diss[~diss.geometry.is_empty & diss.geometry.notna()]
     diss["geometry"] = shapely.set_precision(diss.geometry.values, 30.0)
     return diss.to_crs(C.WGS84)
+
+
+def active_fractions(year: int, ids, geoms_3979) -> pd.DataFrame:
+    """Per pyroCb event, the land-cover composition of its active-burn polygon,
+    sampled at the raster's native 30 m resolution.
+
+    Returns one row per id: top-3 class codes and their fractions of the classified
+    burn area, plus `lc_n_px` (30 m cells sampled).
+    """
+    recs = []
+    with rasterio.open(_tif(year)) as r:
+        for pid, g in zip(ids, geoms_3979):
+            rec = {"pcb_id": pid, "lc_n_px": 0}
+            if g is not None and not g.is_empty:
+                minx, miny, maxx, maxy = g.bounds
+                win = from_bounds(minx, miny, maxx, maxy, r.transform)
+                a = r.read(1, window=win, boundless=True, fill_value=0).astype("uint8")
+                tr = r.window_transform(win)
+                m = rasterio.features.geometry_mask([g], a.shape, tr, invert=True)
+                vals = a[m & (a > 0)]
+                cnt = np.bincount(vals, minlength=max(LC_CLASSES) + 1).astype(float)
+                keep = np.array([c for c in LC_CLASSES if cnt[c] > 0])
+                tot = float(cnt[keep].sum()) if len(keep) else 0.0
+                if tot > 0:
+                    order = keep[np.argsort(cnt[keep])[::-1]][:3]
+                    rec["lc_n_px"] = int(tot)
+                    for i, c in enumerate(order, 1):
+                        rec[f"lc_top{i}_cls"] = int(c)
+                        rec[f"lc_top{i}_frac"] = round(float(cnt[c] / tot), 3)
+            recs.append(rec)
+    return pd.DataFrame(recs)

@@ -101,10 +101,12 @@ def active_cached(year: int, events: pd.DataFrame):
 
 
 def landcover_cached(year: int, mergids) -> "gpd.GeoDataFrame":
-    """Dissolved land-cover polygons around the year's pyroCb fires + 5 km."""
+    """Dissolved land-cover polygons: 1 km over the year's pyroCb fires + 5 km, and
+    10 km over the fire hull + a wide collar (the map's OSM replacement)."""
     mergids = sorted(int(m) for m in mergids)
     params = {"cell": C.LC_CELL_M, "buf": C.LC_BUFFER_M, "simp": C.LC_SIMPLIFY_M,
-              "split": C.LC_YEAR_SPLIT, "mergids": mergids}
+              "bg_cell": C.LC_BG_CELL_M, "bg_buf": C.LC_BG_BUFFER_M,
+              "bg_simp": C.LC_BG_SIMPLIFY_M, "split": C.LC_YEAR_SPLIT, "mergids": mergids}
     tif = LC._tif(year)
 
     def build():
@@ -113,6 +115,24 @@ def landcover_cached(year: int, mergids) -> "gpd.GeoDataFrame":
         return LC.landcover_layer(year, list(g))
 
     return C.cached("landcover", year, params, [tif], build, geo=True)
+
+
+def landcover_fractions_cached(year: int, active_gdf) -> pd.DataFrame:
+    """Land-cover top-3 composition of each event's `LC_ACTIVE_WINDOW` (6 h pre-onset)
+    active-burn polygon, at the raster's native 30 m resolution."""
+    pre, post = C.LC_ACTIVE_WINDOW
+    sub = active_gdf[(active_gdf["pre_h"] == pre) & (active_gdf["post_h"] == post)]
+    sub = sub[~sub.geometry.is_empty & sub.geometry.notna()]
+    ids = sorted(sub["pcb_id"].tolist())
+    params = {"win": [pre, post], "ids": ids, "split": C.LC_YEAR_SPLIT}
+
+    def build():
+        if not len(sub):
+            return pd.DataFrame(columns=["pcb_id", "lc_n_px"])
+        g = sub.to_crs(3979)
+        return LC.active_fractions(year, g["pcb_id"].tolist(), list(g.geometry))
+
+    return C.cached("lcfrac", year, params, [LC._tif(year)], build)
 
 
 def run_year(year: int, verbose: bool = True):
@@ -187,7 +207,8 @@ DICT = [
     ("snap_meanFRP", "W/m2", "Area-normalised mean FRP at match_step", "snapshot"),
     ("snap_n_components", "-", "Snapshot rows sharing this mergid (un-executed merge components)", "snapshot"),
     ("active_area_km2_pre12_post12", "km2", "ACTIVE BURN AREA: union of VIIRS pixel footprints from 12 h before to 12 h after onset, localised to the pyroCb's own fire cluster. The sampling geometry for land cover / ERA5", "NFP"),
-    ("active_area_km2_pre{A}_post{B}", "km2", "Same for other windows: pre6_post6, pre24_post24, pre0_post24 (pure post, for blow-ups), pre24_post0", "NFP"),
+    ("active_area_km2_pre{A}_post{B}", "km2", "Same for other windows: pre6_post6, pre24_post24, pre0_post24 (pure post, for blow-ups), pre24_post0, pre6_post0 (the 6 h-before-onset burn, sampled for land cover)", "NFP"),
+    ("lc_top{1,2,3}_cls / _frac", "- / frac", "Top 3 Land Cover of Canada classes and their fraction of the pre6_post0 active-burn polygon, at native 30 m; lc_n_px = 30 m cells sampled", "Land Cover of Canada 2015/2020"),
     ("active_n_pixels_pre12_post12", "-", "Detections in the localised window", "NFP"),
     ("active_n_obs_pre12_post12", "-", "Distinct overpass times in the window; 1 means a single look", "NFP"),
     ("active_n_before_onset_pre12_post12", "-", "Of those detections, how many precede onset (0 => blow-up, see active_is_blowup)", "NFP"),

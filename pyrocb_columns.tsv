@@ -37,7 +37,8 @@ snap_flinelen	km	Active fire-line length at match_step	snapshot
 snap_meanFRP	W/m2	Area-normalised mean FRP at match_step	snapshot
 snap_n_components	-	Snapshot rows sharing this mergid (un-executed merge components)	snapshot
 active_area_km2_pre12_post12	km2	ACTIVE BURN AREA: union of VIIRS pixel footprints from 12 h before to 12 h after onset, localised to the pyroCb's own fire cluster. The sampling geometry for land cover / ERA5	NFP
-active_area_km2_pre{A}_post{B}	km2	Same for other windows: pre6_post6, pre24_post24, pre0_post24 (pure post, for blow-ups), pre24_post0	NFP
+active_area_km2_pre{A}_post{B}	km2	Same for other windows: pre6_post6, pre24_post24, pre0_post24 (pure post, for blow-ups), pre24_post0, pre6_post0 (the 6 h-before-onset burn, sampled for land cover)	NFP
+lc_top{1,2,3}_cls / _frac	- / frac	Top 3 Land Cover of Canada classes and their fraction of the pre6_post0 active-burn polygon, at native 30 m; lc_n_px = 30 m cells sampled	Land Cover of Canada 2015/2020
 active_n_pixels_pre12_post12	-	Detections in the localised window	NFP
 active_n_obs_pre12_post12	-	Distinct overpass times in the window; 1 means a single look	NFP
 active_n_before_onset_pre12_post12	-	Of those detections, how many precede onset (0 => blow-up, see active_is_blowup)	NFP

@@ -227,6 +227,33 @@ elements, and the polygon layer is only ~1 MB for all years after coordinate sna
 **Rejected:** one union bbox per year - the 2023 pyroCb fires span BC to Quebec to Yukon,
 a 5300 × 7900 km box that is 99 % nodata; per-fire windows keep the reads tiny.
 
+### D-33 — Land cover is an opaque backdrop; OSM only shows where LC does not
+Set the LC pane to `fillOpacity:1`, draw it under every other layer and give it
+`pointer-events:none` (no popup, never intercepts a click). Two resolutions in one layer:
+1 km over each fire + 5 km, and 10 km over a 120 km collar around **each** fire with the
+1 km footprints punched out (`res` = 1000 | 10000). Everything else draws over it unchanged.
+**Rejected:** a hull over all of a year's fires for the coarse pass - they cross the
+dateline and EPSG:3979 is Canada-only, so the hull becomes a garbage megapolygon and the
+10 km read blows up memory. Per-fire collars keep every read a ~240 km box.
+**Rejected:** keeping LC semi-transparent over OSM - the user wants LC to read as the base
+map, and stacking two basemaps just muddies both.
+
+### D-34 — Per-event land-cover fractions come from the 6 h-pre-onset polygon at native 30 m
+The info-panel "top 3 land covers" is sampled over the `(6, 0)` active-burn polygon (the
+6 h before onset - the ground that fed the plume), read at the raster's full 30 m, not from
+the decimated 1 km map layer. Added `(6, 0)` to `ACTIVE_TABLE_WINDOWS` so that polygon
+exists everywhere; `active_fractions` does a windowed native read + `geometry_mask` +
+`bincount`. Fractions are over classified cells in the boreal palette only (nodata excluded).
+**Rejected:** the ±12 h headline polygon - it includes post-onset spread, which is not the
+fuel that drove the pyroCb. **Rejected:** reusing the 1 km layer - a ~10 km² polygon is
+only ~10 cells at 1 km, far too coarse for a composition.
+
+### D-35 — Drop the static "active burn at onset" map layer
+The ±12 h active-burn outline layer is redundant once a pyroCb click opens the window
+slider + animation (D-30, D-31), which shows the same geometry interactively for any
+window. The polygons remain in `pyrocb_active_areas.gpkg` and as attribute-table columns.
+**Rejected:** keeping it as a default-off layer - one more toggle for a strictly worse view.
+
 ### D-20 — Analysis lives in a package, not in notebook string literals
 `make_notebook.py` emits the notebook; the logic sits in `pyrocb/` so it can be imported, tested,
 linted and profiled. The notebook narrates and calls it.

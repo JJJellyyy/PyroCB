@@ -223,6 +223,9 @@ for y in SNAP_YRS:
     s = active.summarise(active_geom[y])
     if len(s):
         e = e.merge(s, on="pcb_id", how="left")
+    lf = pipeline.landcover_fractions_cached(y, active_geom[y])
+    if len(lf) and lf.shape[1] > 1:
+        e = e.merge(lf, on="pcb_id", how="left")
     _ev.append(e)
 events = pd.concat(_ev, ignore_index=True)
 active_all = pd.concat([active_geom[y] for y in SNAP_YRS if len(active_geom[y])],
@@ -364,6 +367,8 @@ for y in YEARS:
                          "active_n_obs_pre12_post12", "active_n_before_onset_pre12_post12",
                          "active_n_after_onset_pre12_post12", "active_frp_p95_pre12_post12",
                          "active_detach_km_pre12_post12", "active_is_blowup", "agrid",
+                         "lc_top1_cls", "lc_top1_frac", "lc_top2_cls", "lc_top2_frac",
+                         "lc_top3_cls", "lc_top3_frac", "lc_n_px",
                          "geometry")
                 if c in pg.columns]]
 
@@ -396,21 +401,6 @@ for y in YEARS:
         b64["bnd"], _, _ = pack(json.loads(bg.drop(columns=[c for c in ("step_lo",) if c in bg]).to_json(drop_id=True)))
     else:
         b64["bnd"], _, _ = pack({"type": "FeatureCollection", "features": []})
-
-    ag = active_geom.get(y)
-    hp, ho = C.ACTIVE_HEADLINE
-    if ag is not None and len(ag):
-        ah = ag[(ag.pre_h == hp) & (ag.post_h == ho)].copy()
-        # +/- 200 m closes the ~375 m pixel lattice into solid blobs before simplifying.
-        ah["geometry"] = smooth_for_map(ah.geometry, 200.0, 150.0)
-        ah = gpd.GeoDataFrame(ah, geometry="geometry", crs=C.METRIC_CRS).to_crs(C.WGS84)
-        ah = ah[~ah.geometry.is_empty & ah.geometry.notna()]
-        ah["doy"] = pd.to_datetime(ah["datetime"]).dt.dayofyear
-        for c in ("datetime", "t_first", "t_last"):
-            ah[c] = pd.to_datetime(ah[c]).dt.strftime("%Y-%m-%d %H:%M")
-        b64["act"], _, _ = pack(json.loads(ah.to_json(drop_id=True)))
-    else:
-        b64["act"], _, _ = pack({"type": "FeatureCollection", "features": []})
 
     # Per-detection pixels (widest window, localised) -> the map's slider / animation.
     pixobj = {}
@@ -490,7 +480,9 @@ HTML = """<!DOCTYPE html>
   html,body{margin:0;height:100%}
   #map{position:absolute;inset:0;background:#aad3df}
   .panel{background:#fff;padding:9px 11px;border-radius:6px;font:12px/1.4 system-ui,sans-serif;
-         box-shadow:0 1px 5px rgba(0,0,0,.4);max-width:252px}
+         box-shadow:0 1px 5px rgba(0,0,0,.4);max-width:252px;
+         max-height:calc(100vh - 28px);overflow-y:auto;overflow-x:hidden}
+  .leaflet-right .panel{clear:both}
   .panel h4{margin:0 0 6px;font-size:12px}
   .panel .sub{color:#666;margin:2px 0 6px}
   .chips{display:flex;flex-wrap:wrap;gap:4px}
@@ -615,7 +607,8 @@ function drawPix(pid, loH, hiH, {fit=false, reuse=false}={}){
   const {fc, n, nb} = pixWindow(pid, loH, hiH);
   if (!reuse || !highlightLayer){
     clearHighlight();
-    highlightLayer = L.geoJSON(fc, {pane:"hl", renderer:R.hl, style:()=>HL_STYLE}).addTo(map);
+    highlightLayer = L.geoJSON(fc, {pane:"hl", renderer:R.hl, interactive:false,
+      style:()=>HL_STYLE}).addTo(map);
   } else {
     highlightLayer.clearLayers(); highlightLayer.addData(fc);
   }
@@ -642,6 +635,7 @@ let winPre = 12, winPost = 12;        // sticky; grid {0,6,12,18,24}, sum >= 6
 let loopSec = 5, animStyle = "cumulative";   // "cumulative" | "sliding"
 const SLIDE_W = 6;                    // sliding-window width, hours
 const infoEl = document.getElementById("info");
+L.DomEvent.disableClickPropagation(infoEl); L.DomEvent.disableScrollPropagation(infoEl);
 let animReq = null, animT0 = 0;
 function stopAnim(){ if (animReq){ cancelAnimationFrame(animReq); animReq = null; } }
 function closeInfo(){ stopAnim(); infoEl.style.display = "none"; clearHighlight(); hideNotice(); }
@@ -661,6 +655,9 @@ function openInfoPanel(p){
     +`<div class="bd"><div style="color:#666;margin-bottom:3px">${esc(p.fire_name||"unnamed fire")}`
     +(p.active_is_blowup?` &nbsp;<span class="warn">&#9888;&#65039; blow-up</span>`:"")
     +`</div><table>${rows(dt)}</table>`
+    +(lcTop3Html(p) ? `<div class="sl"><b>Land cover &mdash; 6 h pre-onset burn</b>`
+        +`<div style="color:#666;font-size:11px">top 3 classes &middot; native 30 m`
+        +(p.lc_n_px!=null?` &middot; ${p.lc_n_px} cells`:"")+`</div>${lcTop3Html(p)}</div>` : "")
     +`<div class="sl"><b>Active burn</b> ${seg("pm","Static","Animate")}`
     +`<div id="paneStatic">`
       +`<label>before <input type="range" id="slPre" min="0" max="24" step="6" value="${winPre}">`
@@ -773,19 +770,21 @@ const map = L.map("map").setView([62,-105], 3);
 L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
   {maxZoom:19, attribution:"&copy; OpenStreetMap"}).addTo(map);
 
-const PANES = ["lc","per","act","bnd","ign","pcb","orp"];
+const PANES = ["lc","per","bnd","ign","pcb","orp"];
 const R = {};
 PANES.forEach((k,i)=>{ map.createPane(k); map.getPane(k).style.zIndex = 405+i*10;
                        R[k] = L.canvas({pane:k}); });
-map.createPane("ignlbl"); map.getPane("ignlbl").style.zIndex = 455;   // stars: above bands, below pyroCb
+map.getPane("lc").style.pointerEvents = "none";                      // land cover: backdrop only, never eats a click
+map.createPane("ignlbl"); map.getPane("ignlbl").style.zIndex = 452;   // stars: above bands, below pyroCb
 map.createPane("lbl"); map.getPane("lbl").style.zIndex = 480;
 map.createPane("hl");  map.getPane("hl").style.zIndex = 490;          // active-burn highlight: on top of all
+map.getPane("hl").style.pointerEvents = "none";                      // ...but transparent to clicks, so a new pyroCb stays selectable
 R.hl = L.canvas({pane:"hl"});
 
-const ALL = ["lc","per","act","bnd","ign","pcb","pcbC","orp"];
+const ALL = ["lc","per","bnd","ign","pcb","pcbC","orp"];
 const cache = {}, byFire = {};
 const activeYears = new Set([YEARS[YEARS.length-1]]);
-const showKind = {lc:false, per:true, act:true, bnd:true, ign:true, pcb:true, orp:true};
+const showKind = {lc:false, per:true, bnd:true, ign:true, pcb:true, orp:true};
 
 // Land Cover of Canada palette (classes present in the boreal zone).
 const LC_COL = {1:"#003d00",2:"#949c70",5:"#148c3d",6:"#5c752b",8:"#b38a2d",10:"#e1cf8a",
@@ -795,6 +794,23 @@ const LC_LAB = {1:"Needleleaf forest",2:"Taiga needleleaf",5:"Broadleaf deciduou
   6:"Mixed forest",8:"Shrubland",10:"Grassland",11:"Polar shrub-lichen-moss",
   12:"Polar grass-lichen-moss",13:"Polar barren-lichen-moss",14:"Wetland",15:"Cropland",
   16:"Barren land",17:"Urban",18:"Water",19:"Snow & ice"};
+
+// Land-cover composition of a pyroCb's 6 h-before-onset active-burn polygon (30 m).
+function lcSwatch(c){return `<span style="display:inline-block;width:12px;height:12px;`
+  +`border-radius:2px;margin-right:5px;vertical-align:-2px;background:${LC_COL[c]||'#999'}"></span>`;}
+function lcTop3Html(p){
+  const a=[];
+  for(let i=1;i<=3;i++){const c=p["lc_top"+i+"_cls"], f=p["lc_top"+i+"_frac"];
+    if(c!=null&&f!=null) a.push(`<div style="margin:2px 0">${lcSwatch(c)}`
+      +`${esc(LC_LAB[c]||("class "+c))} <b>${Math.round(f*100)}%</b></div>`);}
+  return a.join("");
+}
+function lcTop3Text(p){
+  const a=[];
+  for(let i=1;i<=3;i++){const c=p["lc_top"+i+"_cls"], f=p["lc_top"+i+"_frac"];
+    if(c!=null&&f!=null) a.push((LC_LAB[c]||("class "+c))+" "+Math.round(f*100)+"%");}
+  return a.join(", ");
+}
 let hideOrphans=false;
 
 function buildLayers(y, gj){
@@ -844,6 +860,7 @@ function buildLayers(y, gj){
           ["Active burn ±12h (km²)",p.active_area_km2_pre12_post12],
           ["Active-burn detections",p.active_n_pixels_pre12_post12],
           ["  before / after onset",p.active_n_before_onset_pre12_post12+" / "+p.active_n_after_onset_pre12_post12],
+          ["Land cover (6 h pre-onset)",lcTop3Text(p)],
           ["Blew up before observed",p.active_is_blowup?"yes":""]])}</table>`);
       }
       l.on("click", () => DETAIL_MODE==="panel" ? openInfoPanel(p)
@@ -874,34 +891,12 @@ function buildLayers(y, gj){
   };
   const bndLayerStyle = l => l.setStyle(bndOpts.style(l.feature));
 
-  // Active burn area: localised union of VIIRS pixel footprints from -12 h to +12 h of
-  // onset - the polygon land-cover and ERA5 covariates get sampled over. Drawn as a
-  // bright outline; click a pyroCb to scrub the window with the slider.
-  const actOpts = {
-    pane:"act", renderer:R.act,
-    style: ft => ({color:"#00e5ff", weight:1.6, fill:true, fillColor:"#00e5ff",
-                   fillOpacity:0.18, dashArray:"4 3"}),
-    onEachFeature:(ft,l)=>{const p=ft.properties;
-      l.bindPopup(`<b>Active burn, &minus;${p.pre_h} h &hellip; +${p.post_h} h</b><br>`
-        +`${esc(p.pcb_id)}<table>${rows([
-        ["Fire (mergid)",p.mergid],["Onset (UTC)",p.datetime],
-        ["Active area (km²)",p.area_km2],
-        ["Detached from pyroCb (km)",p.detach_km],["Clusters in window",p.n_clusters],
-        ["VIIRS detections",p.n_pixels],["Distinct overpasses",p.n_obs],
-        ["Detections before / after onset",p.n_before_onset+" / "+p.n_after_onset],
-        ["FRP p95 (MW)",p.frp_p95],["First / last obs",p.t_first+" → "+p.t_last]])}</table>`);}
-  };
-
   return {
-    lc:   L.geoJSON(gj.lc, {pane:"lc", renderer:R.lc,
-            style: ft => ({stroke:false, fillColor:LC_COL[ft.properties.cls]||"#999",
-                           fillOpacity:0.55}),
-            onEachFeature:(ft,l)=>l.bindPopup(
-              `<b>${esc(LC_LAB[ft.properties.cls]||("class "+ft.properties.cls))}</b>`
-              +`<br>land cover ${y<2018?2015:2020}, 1 km`)}),
+    lc:   L.geoJSON(gj.lc, {pane:"lc", renderer:R.lc, interactive:false,
+            style: ft => ({stroke:false, fill:true,
+                           fillColor:LC_COL[ft.properties.cls]||"#999", fillOpacity:1})}),
     per:  L.geoJSON(gj.per, perOpts),
     bnd:  L.geoJSON(gj.bnd, bndOpts),
-    act:  L.geoJSON(gj.act, actOpts),
     ign:  L.geoJSON(gj.ign, ignOpts),
     pcb:  L.geoJSON(gj.pcb, pcbOpts(undefined)),
     pcbC: L.geoJSON(gj.pcb, pcbOpts(f=>f.properties.match_method!=="unmatched")),
@@ -921,7 +916,6 @@ function wanted(){
   if (showKind.lc) w.add("lc");
   if (showKind.per) w.add("per");
   if (showKind.bnd) w.add("bnd");
-  if (showKind.act) w.add("act");
   if (showKind.ign) w.add("ign");
   if (showKind.pcb) w.add(hideOrphans?"pcbC":"pcb");
   if (showKind.orp && !hideOrphans) w.add("orp");
@@ -931,10 +925,10 @@ function wanted(){
 async function ensureYear(y){
   if (cache[y]) return cache[y];
   const d = DATA[y];
-  const [per,ign,pcb,bnd,act,pix,lc] = await Promise.all(
-    [d.per,d.ign,d.pcb,d.bnd,d.act,d.pix,d.lc].map(unpack));
+  const [per,ign,pcb,bnd,pix,lc] = await Promise.all(
+    [d.per,d.ign,d.pcb,d.bnd,d.pix,d.lc].map(unpack));
   Object.assign(byPcbPix, pix);          // pcb_id -> per-detection arrays
-  cache[y] = buildLayers(y,{per,ign,pcb,bnd,act,lc});
+  cache[y] = buildLayers(y,{per,ign,pcb,bnd,lc});
   return cache[y];
 }
 
@@ -1007,7 +1001,6 @@ panel.onAdd = () => {
       <label><input type="checkbox" data-kind="lc"> Land cover (1 km, fire + 5 km)</label>
       <label><input type="checkbox" data-kind="per" checked> Fire perimeters</label>
       <label><input type="checkbox" data-kind="bnd" checked> Growth bands (split at pyroCb)</label>
-      <label><input type="checkbox" data-kind="act" checked> Active burn area at onset (&plusmn;12 h)</label>
       <label><input type="checkbox" data-kind="ign" checked> Fire ignitions</label>
       <label><input type="checkbox" data-kind="pcb" checked> pyroCb events</label>
       <label><input type="checkbox" data-kind="orp" checked> Flag unmatched pyroCb</label>
@@ -1054,7 +1047,8 @@ function rebindPopups(y){
       ["Fraction burned before",p.frac_burned_before],["Obs lag (h)",p.obs_lag_h],
       ["Active burn ±12h (km²)",p.active_area_km2_pre12_post12],
       ["Active-burn detections",p.active_n_pixels_pre12_post12],
-      ["  before / after onset",p.active_n_before_onset_pre12_post12+" / "+p.active_n_after_onset_pre12_post12]
+      ["  before / after onset",p.active_n_before_onset_pre12_post12+" / "+p.active_n_after_onset_pre12_post12],
+      ["Land cover (6 h pre-onset)",lcTop3Text(p)]
       ])}</table>`);
   });
 }
@@ -1073,13 +1067,13 @@ function drawLegend(){
       Ignition (labelled with its order within the fire)</div>
     <div class="row"><i style="background:#888;border:1.5px solid #111"></i>pyroCb (labelled with its # on the fire)</div>
     <div class="row"><i style="border:2px solid #e11;background:none"></i>unmatched pyroCb</div>
-    <div class="row"><i class="sq" style="border:2px solid #00e5ff;background:rgba(0,229,255,.18)"></i>active burn at onset (&plusmn;12 h)</div>
     <div class="sub" style="margin-top:5px">Growth bands: pale core = burned before the first
-    pyroCb, darker = later runs; the faintest outer band is after the last pyroCb.</div>`
-    + (showKind.lc ? `<div class="sub" style="margin-top:6px">Land cover</div>`
+    pyroCb, darker = later runs; the faintest outer band is after the last pyroCb.
+    Click a pyroCb for its active-burn window &amp; animation.</div>`
+    + (showKind.lc ? `<details style="margin-top:6px"><summary style="cursor:pointer;color:#666">Land cover (1 km over fires, 10 km elsewhere)</summary>`
         + [1,2,5,6,8,10,11,12,13,14,15,16,18].map(c =>
             `<div class="row"><i class="sq" style="background:${LC_COL[c]}"></i>${LC_LAB[c]}</div>`
-          ).join("") : "");
+          ).join("") + `</details>` : "");
   if (MODE==="year"){
     legendDiv.innerHTML = `<h4>Boreal fires &amp; pyroCb</h4>${common}
       <div class="sub" style="margin:6px 0 3px">Colour = year</div>

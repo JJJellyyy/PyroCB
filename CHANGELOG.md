@@ -7,6 +7,40 @@ Rationale for each choice lives in [DECISIONS.md](DECISIONS.md); data discoverie
 
 ---
 
+## v0.11 — 2026-09-06 — land cover as backdrop, per-event LC fractions, panel fixes
+
+### Added
+* **Land-cover top 3 per pyroCb.** The info panel and the marker popup now list the three
+  commonest *Land Cover of Canada* classes and their fractions within the **6 h-before-onset**
+  active-burn polygon (`ACTIVE_TABLE_WINDOWS` gains `(6, 0)`), sampled at the raster's native
+  **30 m** — not the 1 km map layer. Columns `lc_top{1,2,3}_cls` / `_frac` / `lc_n_px` are
+  also written to `pyrocb_fire_attributes.tsv`/`.xlsx`.
+  (`landcover.active_fractions`, `pipeline.landcover_fractions_cached`, cache stage `lcfrac`.)
+* **Coarse land-cover backdrop.** Away from the fires the map now shows 10 km land cover
+  instead of OpenStreetMap: a `LC_BG_BUFFER_M` (120 km) collar around **each** fire (never a
+  hull over all of them — fires cross the dateline and EPSG:3979 is Canada-only), clipped to
+  the raster, with the 1 km footprints punched out. `LC_BG_CELL_M` / `LC_BG_BUFFER_M` /
+  `LC_BG_SIMPLIFY_M` in config; `res` (1000 | 10000) on every LC feature.
+
+### Changed
+* **Land cover is now an opaque backdrop**, drawn under everything, `pointer-events:none`
+  (never eats a click, no popup). OpenStreetMap only shows through where there is no land
+  cover. All other layers sit above it unchanged.
+* **Removed the "Active burn area at onset (±12 h)" layer** — redundant now that clicking a
+  pyroCb gives the window slider + animation. The ±12 h polygons are still in
+  `pyrocb_active_areas.gpkg` and the attribute table.
+* Land-cover legend swatches moved into a collapsed `<details>`; control panel and legend
+  cap at viewport height and scroll internally, so a long legend no longer hides the panel
+  behind it.
+
+### Fixed
+* **Could not select a second pyroCb without reloading.** The active-burn highlight canvas
+  (pane `hl`, z-index 490) sat above the markers and its filled polygons swallowed the click.
+  The `hl` pane is now `pointer-events:none` and the highlight layer `interactive:false`; the
+  info panel also stops click/scroll propagation to the map.
+
+---
+
 ## v0.10 — 2026-09-06 — land-cover context layer
 
 ### Added
