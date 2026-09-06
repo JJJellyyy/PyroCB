@@ -248,6 +248,20 @@ exists everywhere; `active_fractions` does a windowed native read + `geometry_ma
 fuel that drove the pyroCb. **Rejected:** reusing the 1 km layer - a ~10 km² polygon is
 only ~10 cells at 1 km, far too coarse for a composition.
 
+### D-39 — Land cover map layer: finer inside SMALL perimeters, but not true 30 m vector
+Three tiers, painter-ordered coarse→fine: 10 km collar, 1 km over perimeter + 5 km, and an
+inside-perimeter tier at **≈90 m for fires whose bbox is under `LC_FINE_MAX_KM2` (150 km²)**
+only. Larger fires keep the 1 km tier. Sub-km features are simplified again in the payload
+(~75 m) and snapped ~22 m. Each feature keeps `res` (m).
+**Measured and rejected — true 30 m vector:** polygonising the raster at 30 m over every
+pyroCb perimeter, dissolved by class, gave a **14 MB** compressed 2023 land-cover payload
+(**57 MB** whole file). 90/300 m over *all* fires was still ~7 MB (31 MB file). Only 90 m
+over small fires keeps the whole file at ~17 MB (≈ the v0.12 baseline).
+**Not a loss for the science:** `active_fractions` still reads the raster at native 30 m for
+the attribute table and the info-panel top-3 — only the cosmetic map fill is limited.
+**Deferred to I-3:** a raster/tile render path if the *visual* layer really needs 30 m
+everywhere.
+
 ### D-36 — Whole-fire animation is adaptively decimated, tiered on time-to-pyroCb
 Shipping every NFP detection of a big merge complex (10 k+, months long) would bloat the
 map. Instead, per detection, take the minimum time gap to any of the fire's pyroCb onsets:

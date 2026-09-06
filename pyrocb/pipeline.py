@@ -108,7 +108,9 @@ def landcover_cached(year: int, mergids) -> "gpd.GeoDataFrame":
     mergids = sorted(int(m) for m in mergids)
     params = {"cell": C.LC_CELL_M, "buf": C.LC_BUFFER_M, "simp": C.LC_SIMPLIFY_M,
               "bg_cell": C.LC_BG_CELL_M, "bg_buf": C.LC_BG_BUFFER_M,
-              "bg_simp": C.LC_BG_SIMPLIFY_M, "split": C.LC_YEAR_SPLIT, "mergids": mergids}
+              "bg_simp": C.LC_BG_SIMPLIFY_M, "nat_cell": C.LC_FINE_CELL_M,
+              "nat_simp": C.LC_FINE_SIMPLIFY_M, "nat_max": C.LC_FINE_MAX_KM2,
+              "split": C.LC_YEAR_SPLIT, "mergids": mergids}
     tif = LC._tif(year)
 
     def build():
@@ -158,10 +160,14 @@ def firesim_cached(year: int, events: pd.DataFrame, linked) -> dict:
     firesim params, the pyroCb onsets and the NFP file stamps.
     """
     linked = {int(m) for m in linked}
-    ev = events[(events["year"] == year) & events["mergid"].notna()]
+    ev = events[(events["year"] == year) & events["mergid"].notna()].copy()
     ev = ev[ev["mergid"].astype("int64").isin(linked)]
-    onsets = {int(m): sorted(str(pd.Timestamp(x)) for x in v)
-              for m, v in ev.groupby("mergid")["datetime"]}
+    onsets = {}
+    for m, g in ev.groupby("mergid"):
+        onsets[int(m)] = [
+            {"t": str(pd.Timestamp(r.datetime)), "lat": float(r.lat),
+             "lon": float(r.lon), "id": str(r.pcb_id)}
+            for r in g.sort_values("datetime").itertuples()]
     key = C.params_hash({
         "near": list(C.FIRESIM_PCB_NEAR_H), "grid": list(C.FIRESIM_GRID_M),
         "bin": list(C.FIRESIM_BIN_H), "max": C.FIRESIM_MAX_PTS,
@@ -175,7 +181,7 @@ def firesim_cached(year: int, events: pd.DataFrame, linked) -> dict:
             pass
     for old in C.CACHE_DIR.glob(f"firesim_{year}_*.json"):
         old.unlink()
-    d = FS.fire_series(year, {m: [pd.Timestamp(x) for x in v] for m, v in onsets.items()})
+    d = FS.fire_series(year, onsets)
     fp.write_text(json.dumps(d))
     return d
 

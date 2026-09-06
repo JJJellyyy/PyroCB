@@ -7,6 +7,38 @@ Rationale for each choice lives in [DECISIONS.md](DECISIONS.md); data discoverie
 
 ---
 
+## v0.13 — 2026-09-06 — animation window/loop controls, native LC in the perimeter, pop flash
+
+### Added
+* **Sliding-window width** for the whole-fire animation: 6 h / 24 h / 48 h / 1 week, shown
+  only when the *Sliding* style is picked (`slideW`, replaces the fixed `SLIDE_W = 6`).
+* **Loop lengths 15 s and 20 s** (now 3 / 5 / 10 / 15 / 20 s).
+* **"A pyroCb just popped" flash.** During whole-fire animation, every pyroCb whose onset the
+  cursor has passed gets a dark-red dot; the one firing this frame gets a pulsing ring and the
+  readout names the event. Onsets are also ticked on the progress bar (already in v0.12).
+* **Finer land cover inside the fire perimeter.** A third LC tier clipped to the perimeter
+  itself (no collar): **≈90 m**, but **only for fires whose bbox is under `LC_FINE_MAX_KM2`
+  (150 km²)** — large perimeters at any sub-km resolution blow up the payload. Larger fires
+  keep just the 1 km tier. Every LC feature carries `res` (90 | 1000 | 10000).
+  Measured on the way here: true 30 m polygons over every pyroCb perimeter = ~14 MB
+  compressed for 2023 alone (57 MB whole file); 90/300 m over all of them still ~7 MB
+  (31 MB file). The **exact 30 m composition still reaches the user** through
+  `active_fractions` (info panel + `pyrocb_fire_attributes.tsv`); only the cosmetic map fill
+  is limited. A real 30 m *visual* needs a raster/tile path — IDEAS I-3. `LC_FINE_*` config.
+
+### Fixed
+* **Loop buttons were glitchy** — the old 2-button `.seg` plus a bolted-on "10 s" button never
+  kept a single consistent `.on` state. Replaced with one `radio()` helper over a proper
+  button group; same helper drives the new window-width control.
+
+### Note
+30 m vector land cover over every perimeter is ~14 MB compressed for 2023 (57 MB whole file);
+even 90/300 m over all fires is ~7 MB. So the inside-perimeter tier is 90 m for small fires
+only and the whole file lands at 16.8 MB (≈ v0.12). The 30 m numbers are still exact in the
+info panel and attribute table; a closer *visual* needs a raster/tile path — IDEAS I-3.
+
+---
+
 ## v0.12 — 2026-09-06 — whole-fire animation, LC-fraction fixes, legend dropdown
 
 ### Added

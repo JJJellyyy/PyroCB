@@ -99,6 +99,16 @@ LC_YEAR_SPLIT = 2018
 LC_CELL_M     = 1000.0
 LC_BUFFER_M   = 5000.0
 LC_SIMPLIFY_M = 2000.0
+# Fine tier INSIDE the fire perimeter only (no collar), and ONLY for fires whose
+# bounding box is under LC_FINE_MAX_KM2 - large fires keep just the 1 km tier.
+# True 30 m polygons over every pyroCb perimeter come to ~14 MB compressed for 2023
+# alone (57 MB whole file); even 90/300 m over all of them is ~7 MB. So the map only
+# gets a crisp 90 m fill where it is cheap. The 30 m composition that matters for the
+# science is still exact - active_fractions() reads the raster at native 30 m for the
+# attribute table and the info panel.
+LC_FINE_CELL_M     = 90.0
+LC_FINE_SIMPLIFY_M = 150.0
+LC_FINE_MAX_KM2    = 150.0
 # Coarse background land cover: away from the fires the map still shows land cover
 # rather than OpenStreetMap, but decimated hard so the browser copes. Drawn under
 # the 1 km fire layer, over the convex hull of the year's pyroCb fires + this collar.

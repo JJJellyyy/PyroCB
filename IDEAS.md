@@ -45,7 +45,22 @@ optimisations."
 **Recommendation:** start with the third fixed national tier (small, low-risk), measure the
 payload, then decide whether the smooth gradient is worth it.
 
-**Status:** not started; next LC iteration.
+**Progress (v0.13):** the *inward* direction was attempted and measured. True 30 m vector
+land cover over every pyroCb perimeter = **14 MB** compressed for 2023 alone (57 MB whole
+file); 90/300 m over all fires still ~7 MB. Shipped a compromise: **90 m inside small
+perimeters only** (bbox < 150 km²), whole file back to ~17 MB (D-39). The exact 30 m
+composition is still in the panel/table via `active_fractions`.
+
+**Open — a real 30 m *visual* everywhere needs a raster/tile path, not polygons:**
+- pre-render each fire's perimeter land cover to a small PNG, embed as a data-URI
+  `L.imageOverlay` (one per fire, clipped, ~30 m) — crisp, and a PNG of a 20 km scar at
+  30 m is far smaller than its polygonisation;
+- or a tiny embedded tile pyramid for the coarse national layer.
+Plus the still-open *national rough tier* and the smooth `cell = f(distance-to-pyroCb)`
+gradient.
+
+**Status:** inward tier shipped (small fires); national tier, gradient, and the raster
+path for a true 30 m visual are open.
 
 ---
 

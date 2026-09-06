@@ -47,7 +47,10 @@ def _decimate(sec, x, y, tier, grid_m, bin_h):
 
 
 def fire_series(year: int, onsets: dict) -> dict:
-    """{str(mergid): payload} for every mergid in `onsets` (mergid -> [pyroCb UTC ...])."""
+    """{str(mergid): payload} for every mergid in `onsets`.
+
+    `onsets[mergid]` is a list of {"t": UTC, "lat": ..., "lon": ..., "id": pcb_id}.
+    """
     nfp = io.read_nfp_year(year)
     by = {k: v for k, v in nfp.groupby("mergid")}
     grid = np.array(C.FIRESIM_GRID_M, float)
@@ -67,8 +70,9 @@ def fire_series(year: int, onsets: dict) -> dict:
         dx = g["DS"].to_numpy(float) * 500.0
         dy = g["DT"].to_numpy(float) * 500.0
 
-        ons_s = np.sort([(np.datetime64(pd.Timestamp(o)) - t0) / np.timedelta64(1, "s")
-                         for o in ons])
+        ons = sorted(ons, key=lambda o: pd.Timestamp(o["t"]))
+        ons_s = np.array([(np.datetime64(pd.Timestamp(o["t"])) - t0) / np.timedelta64(1, "s")
+                          for o in ons], float)
         d_h = np.abs(sec[:, None] - ons_s[None, :]).min(axis=1) / 3600.0
         tier = np.where(d_h <= nearA, 0, np.where(d_h <= nearB, 1, 2)).astype(np.int8)
 
@@ -91,6 +95,8 @@ def fire_series(year: int, onsets: dict) -> dict:
             "t0": pd.Timestamp(t0).strftime("%Y-%m-%d %H:%M"),
             "dur_h": round(float(sec.max()) / 3600.0, 1),
             "pcb_h": [round(float(s) / 3600.0, 1) for s in ons_s],
+            "pcb_ll": [[round(float(o["lat"]), 4), round(float(o["lon"]), 4)] for o in ons],
+            "pcb_id": [str(o["id"]) for o in ons],
             "dlat": ((ll.y.to_numpy() - olat) * 1e5).round().astype(int).tolist(),
             "dlon": ((ll.x.to_numpy() - olon) * 1e5).round().astype(int).tolist(),
             "hw": np.round(hw).astype(int).tolist(),

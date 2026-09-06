@@ -47,6 +47,14 @@ def _tif(year: int) -> str:
     return C.LC_TIF_2015 if year < C.LC_YEAR_SPLIT else C.LC_TIF_2020
 
 
+def _poly_only(g):
+    """Polygonal part of a geometry (make_valid can hand back a GeometryCollection)."""
+    if g.geom_type in ("Polygon", "MultiPolygon"):
+        return g
+    polys = [p for p in getattr(g, "geoms", []) if p.geom_type in ("Polygon", "MultiPolygon")]
+    return shapely.union_all(polys) if polys else shapely.Polygon()
+
+
 def _polygonise(r, clip_geom, cell, simp):
     """Windowed, decimated (majority) read of `r` over `clip_geom`'s bounds, masked to
     `clip_geom`, polygonised by class and dissolved. Returns list of (cls, geom) in 3979."""
@@ -62,8 +70,13 @@ def _polygonise(r, clip_geom, cell, simp):
     out = []
     for geom, val in rasterio.features.shapes(a, mask=a > 0, transform=tr):
         v = int(val)
-        if v in LC_CLASSES:
-            out.append((v, shapely.geometry.shape(geom).simplify(simp)))
+        if v not in LC_CLASSES:
+            continue
+        p = shapely.geometry.shape(geom).simplify(simp)
+        if not p.is_valid:
+            p = _poly_only(shapely.make_valid(p))
+        if not p.is_empty:
+            out.append((v, p))
     return out
 
 
@@ -76,19 +89,34 @@ def landcover_layer(year: int, geoms_3979) -> gpd.GeoDataFrame:
         with the fine footprints punched out, so the map shows land cover instead of
         OpenStreetMap everywhere near the fires without shipping a national raster.
     """
-    geoms_3979 = [g for g in geoms_3979 if g is not None and not g.is_empty]
+    geoms_3979 = [_poly_only(shapely.make_valid(g)) for g in geoms_3979
+                  if g is not None and not g.is_empty]
+    geoms_3979 = [g for g in geoms_3979 if not g.is_empty]
     if not geoms_3979:
         return gpd.GeoDataFrame({"cls": [], "res": []},
                                 geometry=gpd.GeoSeries([], crs=C.WGS84))
 
     fine_bg = [g.buffer(C.LC_BUFFER_M) for g in geoms_3979]
     fine_union = shapely.union_all(fine_bg)
-    fine, coarse = [], []
+    nat, mid, coarse = [], [], []
     with rasterio.open(_tif(year)) as r:
         rbounds = shapely.box(*r.bounds)
+
+        # Fine 90 m tier INSIDE the perimeter (no collar), small fires only - large
+        # perimeters at this resolution blow up the payload (see config). No
+        # .intersection(g): _polygonise already masks to g at raster-cell precision,
+        # and a per-shape clip against a big, self-touching perimeter throws in GEOS.
+        for g in geoms_3979:
+            mnx, mny, mxx, mxy = g.bounds
+            if (mxx - mnx) * (mxy - mny) / 1e6 > C.LC_FINE_MAX_KM2:
+                continue
+            nat += [(v, poly, int(C.LC_FINE_CELL_M)) for v, poly in
+                    _polygonise(r, g, C.LC_FINE_CELL_M, C.LC_FINE_SIMPLIFY_M)]
+
+        # 1 km over the perimeter + 5 km collar.
         for bg in fine_bg:
-            fine += [(v, g, C.LC_CELL_M) for v, g in
-                     _polygonise(r, bg, C.LC_CELL_M, C.LC_SIMPLIFY_M)]
+            mid += [(v, g, C.LC_CELL_M) for v, g in
+                    _polygonise(r, bg, C.LC_CELL_M, C.LC_SIMPLIFY_M)]
 
         # Coarse backdrop: a wide collar around EACH fire (never a hull over all of
         # them - fires span the dateline, and EPSG:3979 is Canada-only, so a global
@@ -99,20 +127,40 @@ def landcover_layer(year: int, geoms_3979) -> gpd.GeoDataFrame:
             if collar.is_empty:
                 continue
             for v, poly in _polygonise(r, collar, C.LC_BG_CELL_M, C.LC_BG_SIMPLIFY_M):
-                p = poly.intersection(collar)
+                try:
+                    p = poly.intersection(collar)
+                except Exception:
+                    p = poly
                 if not p.is_empty:
                     coarse.append((v, p, C.LC_BG_CELL_M))
 
-    parts = coarse + fine   # coarse first so it dissolves/draws under the fine layer
-    parts = [(v, g, res) for v, g, res in parts if g is not None and not g.is_empty]
-    if not parts:
+    # Group by (res, cls) and union with a grid snap - far more robust to the
+    # near-degenerate slivers a 150 m simplify of 30 m shapes can leave than
+    # GeoDataFrame.dissolve, which was throwing "unable to assign free hole to a shell".
+    parts = coarse + mid + nat   # painter's order: coarse under, native on top
+    groups: dict = {}
+    for v, g, res in parts:
+        if g is None or g.is_empty:
+            continue
+        g = _poly_only(shapely.make_valid(g))
+        if not g.is_empty:
+            groups.setdefault((int(res), int(v)), []).append(g)
+    if not groups:
         return gpd.GeoDataFrame({"cls": [], "res": []},
                                 geometry=gpd.GeoSeries([], crs=C.WGS84))
-    gdf = gpd.GeoDataFrame({"cls": [p[0] for p in parts], "res": [int(p[2]) for p in parts]},
-                           geometry=[p[1] for p in parts], crs=3979)
-    diss = gdf.dissolve(["res", "cls"]).reset_index()
-    diss = diss[~diss.geometry.is_empty & diss.geometry.notna()]
+    recs = []
+    for (res, cls), gs in groups.items():
+        try:
+            u = shapely.union_all(gs, grid_size=1.0)
+        except Exception:
+            u = shapely.union_all([shapely.set_precision(x, 5.0) for x in gs])
+        u = _poly_only(shapely.make_valid(u))
+        if not u.is_empty:
+            recs.append((res, cls, u))
+    diss = gpd.GeoDataFrame({"res": [r[0] for r in recs], "cls": [r[1] for r in recs]},
+                            geometry=[r[2] for r in recs], crs=3979)
     diss["geometry"] = shapely.set_precision(diss.geometry.values, 30.0)
+    diss = diss[~diss.geometry.is_empty & diss.geometry.notna()]
     return diss.to_crs(C.WGS84)
 
 
