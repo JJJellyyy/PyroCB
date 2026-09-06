@@ -9,26 +9,43 @@ data discoveries: [FINDINGS.md](FINDINGS.md).
 
 ---
 
-## I-1 — Animate a whole fire event (first pyroCb → last, or first ignition → last burning pixel)
+## I-1 — Animate a whole fire event — DONE (v0.12)
 
-**Ask (2026-09-06):** selecting a pyroCb, play the entire event — not just the ±24 h active
-window — from the first ignition of the complex to the last detected burning pixel, looping in
-a chosen number of seconds.
+Shipped as the *Whole fire* scope in the info-panel Animate tab. Went with **adaptively
+decimated NFP detections** (`pyrocb/firesim.py`), not the snapshot-perimeter idea sketched
+here — the pixel footprints keep the front structure and the merge moments, which is the
+point. Native res within ±24 h of a pyroCb, 1 km/6 h to ±72 h, 3 km/24 h between. See D-36.
 
-**Feasibility: doable in the HTML, but not from the per-detection pixel arrays we ship now.**
-- The current animation reads `byPcbPix` — NFP detections in the widest **±24 h** window,
-  localised to the pyroCb's own cluster. A whole-event animation needs the fire's *entire*
-  detection history (weeks to months), which for the biggest merge complexes is 10 k+ pixels
-  and would bloat the payload if shipped raw per event.
-- **Better source: the 12-hourly Snapshot perimeters.** One simplified cumulative polygon per
-  half-day step, first detection → season end: ~60–120 frames for even a long-lived fire,
-  a few KB each after simplification. Cumulative growth animation, pyroCb onsets marked on the
-  timeline. Far lighter than pixels and it already exists on disk.
-- New work: a `snapshot_series(mergid)` pipeline stage (cache per year), a per-fire payload
-  keyed by `mergid`, and a second animation mode in the info panel ("This window" vs "Whole
-  fire"). Loop-length control reused. Estimate: similar size to the v0.9 slider/animation work.
+---
 
-**Status:** waiting on a go-ahead. If yes, do the snapshot-series version, not raw pixels.
+## I-3 — Country-wide land cover with a resolution gradient
+
+**Ask (2026-09-06):** display land cover for the *entire country* at a very rough scale and as
+fine as possible around pyroCb fires — a smooth resolution gradient rather than the current
+two fixed tiers (1 km over fires + 5 km, 10 km per-fire collar). "Probably many underlying
+optimisations."
+
+**Sketch / options:**
+- **Add a third, national tier.** One decimated read of the whole raster at ~25–50 km
+  (`3800×3200` cells at 50 km — a few seconds, tens of MB RAM), dissolved + hard-simplified,
+  as an always-on base. Then the existing 10 km collar, then 1 km over fires. Cheap, and
+  the payload stays small because coarse polygons have few vertices.
+- **True gradient:** cell size as a smooth function of distance to the nearest pyroCb
+  (e.g. `cell = clip(0.3·d_km, 1 km, 40 km)`), one variable-resolution polygonisation.
+  Cleaner visually, more code; needs a distance-banded read loop.
+- **Raster tiles instead of polygons:** pre-render the coarse national layer to a handful of
+  PNG `L.imageOverlay`s (or a tiny tile pyramid embedded as data URIs). Crisper at speed,
+  but a different rendering path and base64 PNGs are heavy.
+- **Optimisations to look at:** read the raster's internal overviews (`rasterio` `overview_level`)
+  instead of decimating band 1; `rio warp`/`gdal_translate` a one-off coarse GeoTIFF checked
+  into the repo so the build doesn't touch the 2 GB file; topology-preserving simplification
+  (`shapely.simplify` vs `topojson`) to cut vertices harder; quantise coordinates more
+  aggressively for the coarse tier (100 m snap is invisible at 25 km).
+
+**Recommendation:** start with the third fixed national tier (small, low-risk), measure the
+payload, then decide whether the smooth gradient is worth it.
+
+**Status:** not started; next LC iteration.
 
 ---
 

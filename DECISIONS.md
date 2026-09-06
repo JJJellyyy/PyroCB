@@ -248,6 +248,35 @@ exists everywhere; `active_fractions` does a windowed native read + `geometry_ma
 fuel that drove the pyroCb. **Rejected:** reusing the 1 km layer - a ~10 km² polygon is
 only ~10 cells at 1 km, far too coarse for a composition.
 
+### D-36 — Whole-fire animation is adaptively decimated, tiered on time-to-pyroCb
+Shipping every NFP detection of a big merge complex (10 k+, months long) would bloat the
+map. Instead, per detection, take the minimum time gap to any of the fire's pyroCb onsets:
+≤ 24 h keeps native footprint + time; ≤ 72 h dedups to a 1 km grid / 6 h bin; beyond that,
+3 km / 24 h. If the fire still exceeds `FIRESIM_MAX_PTS` the B/C grids widen until it fits.
+So the resolution is highest exactly where the science is (around each event) and coarse in
+the quiet spans, which is what the user asked for. Cached as JSON (it's a dict, not a frame).
+**Rejected:** 12-hourly Snapshot perimeters — lighter, but they're cumulative alpha-shape
+hulls, so you lose the front structure and the merge moments the animation is *for*.
+**Rejected:** one fixed decimation — either too heavy near events or too coarse to watch a
+run develop.
+
+### D-37 — Blow-up land-cover fractions: first 6 h of burning at/after onset
+The `(6, 0)` "6 h before onset" polygon is empty for a blow-up (F4 — no pre-onset
+detections). Rather than leave those events without a composition, sample the first
+`LC_BLOWUP_SPAN_H` (6 h) of detected burning at or after onset — same construction (union of
+localised VIIRS pixel footprints), just shifted in time. The map labels which window was
+used. **Rejected:** the ±12 h headline polygon as the fallback — it includes far more
+post-onset spread than the 6 h the user specified. **Rejected:** no fallback — silently
+drops ~30 % of matched events (the blow-ups) from any land-cover analysis, and they are
+not a random subset.
+
+### D-38 — Per-event land-cover fractions come from detected pixels only, at 30 m
+Locked in after an explicit check: `active_fractions` masks the raster to the *union of the
+VIIRS pixel footprints* in the window (localised to the pyroCb's cluster by
+`active._localise`), read at the raster's native 30 m. Not the fire perimeter, not a convex
+hull, not the decimated 1 km map layer. `lc_n_px` reports the 30 m cell count so a thin
+sample is visible.
+
 ### D-35 — Drop the static "active burn at onset" map layer
 The ±12 h active-burn outline layer is redundant once a pyroCb click opens the window
 slider + animation (D-30, D-31), which shows the same geometry interactively for any

@@ -108,6 +108,18 @@ LC_BG_SIMPLIFY_M = 6000.0
 # The active-burn window whose land-cover composition is reported per pyroCb event
 # (top 3 classes + fractions) in the map's info panel: the 6 h before onset.
 LC_ACTIVE_WINDOW = (6, 0)
+# Blow-up fires (F4) have no pre-onset detections, so the (6, 0) polygon is empty.
+# Fall back to the first this-many hours of detected burning that IS available.
+LC_BLOWUP_SPAN_H = 6.0
+
+# ---------------------------------------------------------------- whole-fire animation
+# The map's "animate the entire event" mode. Every NFP detection of a pyroCb fire,
+# first detection to last, decimated by proximity to a pyroCb onset: near an onset
+# stays near-native, the quiet spans between onsets go coarse. See pyrocb/firesim.py.
+FIRESIM_PCB_NEAR_H = (24.0, 72.0)          # tier A / B / C time-to-onset boundaries
+FIRESIM_GRID_M     = (0.0, 1000.0, 3000.0) # spatial dedup cell per tier (0 = native)
+FIRESIM_BIN_H      = (0.0, 6.0, 24.0)      # time-bin per tier
+FIRESIM_MAX_PTS    = 5000                  # per fire; widen B/C grids until it fits
 
 # Map scope. True -> the map carries only fires credited with a pyroCb (and their
 # ignitions), which is the analysis population; False -> every tracked fire, which is

@@ -13,4 +13,4 @@ variables   the per-event attribute table
 from . import config, io, timebins  # noqa: F401
 
 __all__ = ["config", "io", "timebins", "matching", "bands", "variables",
-           "active", "landcover", "pipeline"]
+           "active", "landcover", "firesim", "pipeline"]

@@ -7,6 +7,32 @@ Rationale for each choice lives in [DECISIONS.md](DECISIONS.md); data discoverie
 
 ---
 
+## v0.12 — 2026-09-06 — whole-fire animation, LC-fraction fixes, legend dropdown
+
+### Added
+* **Animate the entire fire event.** The info-panel *Animate* tab gains a scope toggle:
+  *±24 h window* (as before) or **Whole fire** — first VIIRS detection to last, cumulative or
+  a sliding 6 h front, over the chosen 3/5/10 s loop, with pyroCb onsets marked on the
+  progress bar. Data is adaptively decimated (`pyrocb/firesim.py`, cache stage `firesim`):
+  native resolution within ±24 h of any pyroCb onset, 1 km / 6 h between 24–72 h, 3 km / 24 h
+  in the quiet spans, capped at `FIRESIM_MAX_PTS` per fire. Tier is colour-coded in the
+  animation. `FIRESIM_*` constants in config.
+* **Zoom-to-event is now opt-in.** New "Zoom map to event on select" checkbox (default off);
+  selecting a pyroCb no longer moves the map unless it's ticked.
+
+### Changed
+* **Land-cover legend is a proper collapsible dropdown** (caret, bordered, scrolls) instead
+  of the inline `<details>`.
+* **Blow-up land-cover fractions now have a defined source.** A blow-up has no burning in the
+  6 h before onset, so its `(6, 0)` polygon is empty; the composition now falls back to the
+  first 6 h of detected burning **at or after onset** (`active.first_burn_polys`), same
+  construction — localised VIIRS pixel footprints only. The panel labels which case applies.
+* Confirmed and locked in: the per-event land-cover fractions are sampled over **only the
+  actual detected-burning pixel footprints** in the 6 h window (localised to the pyroCb's own
+  cluster), at native 30 m — not a hull, not the perimeter, not the 1 km map layer.
+
+---
+
 ## v0.11 — 2026-09-06 — land cover as backdrop, per-event LC fractions, panel fixes
 
 ### Added

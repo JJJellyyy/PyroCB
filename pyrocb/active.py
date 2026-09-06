@@ -110,6 +110,36 @@ def slider_data(year: int, events: pd.DataFrame):
     return grid, px
 
 
+def first_burn_polys(year: int, events: pd.DataFrame, span_h: float = None) -> gpd.GeoDataFrame:
+    """Land-cover fallback geometry for blow-up fires (F4), which have no detected
+    burning in the 6 h *before* onset. Union of the localised VIIRS pixel footprints
+    in the first `span_h` hours *at or after* onset; if the fire is not even seen by
+    then, the first `span_h` hours of whatever detections exist.
+
+    Same construction as the (6, 0) window - actual detected-burning pixels only,
+    localised to the pyroCb's own cluster - just a different time slice.
+    """
+    span_h = C.LC_BLOWUP_SPAN_H if span_h is None else span_h
+    rows = []
+    for e, core in _cores(year, events):
+        if core is None or core.get("empty"):
+            continue
+        t = core["t_rel_h"]
+        m = (t >= 0.0) & (t <= span_h)
+        if not m.any():
+            m = t <= float(t.min()) + span_h
+        if not m.any():
+            continue
+        x, y, dx, dy = core["x"][m], core["y"][m], core["dx"][m], core["dy"][m]
+        geom = io.ensure_valid([shapely.union_all(
+            shapely.box(x - dx, y - dy, x + dx, y + dy), grid_size=C.PRECISION_M)])[0]
+        rows.append({"pcb_id": e["pcb_id"], "geometry": geom})
+    if not rows:
+        return gpd.GeoDataFrame({"pcb_id": []},
+                                geometry=gpd.GeoSeries([], crs=C.METRIC_CRS))
+    return gpd.GeoDataFrame(rows, geometry="geometry", crs=C.METRIC_CRS)
+
+
 def _cores(year: int, events: pd.DataFrame):
     """Yield (event_row, core) for every matched event. `core` is a dict with the
     widest-window pixels already localised to the event's own fire cluster, or None

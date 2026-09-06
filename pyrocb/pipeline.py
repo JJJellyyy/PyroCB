@@ -6,6 +6,7 @@ None (all years) reuses 2023 untouched and only computes the rest.
 from __future__ import annotations
 
 import glob
+import json
 import os
 
 import geopandas as gpd
@@ -15,6 +16,7 @@ import pandas as pd
 from . import active as A
 from . import bands as B
 from . import config as C
+from . import firesim as FS
 from . import io
 from . import landcover as LC
 from . import matching as M
@@ -117,14 +119,28 @@ def landcover_cached(year: int, mergids) -> "gpd.GeoDataFrame":
     return C.cached("landcover", year, params, [tif], build, geo=True)
 
 
-def landcover_fractions_cached(year: int, active_gdf) -> pd.DataFrame:
+def landcover_fractions_cached(year: int, active_gdf, events: pd.DataFrame) -> pd.DataFrame:
     """Land-cover top-3 composition of each event's `LC_ACTIVE_WINDOW` (6 h pre-onset)
-    active-burn polygon, at the raster's native 30 m resolution."""
+    active-burn polygon, at the raster's native 30 m resolution.
+
+    Blow-up events have an empty (6, 0) polygon; for those, fall back to the first
+    `LC_BLOWUP_SPAN_H` hours of detected burning (`active.first_burn_polys`)."""
     pre, post = C.LC_ACTIVE_WINDOW
     sub = active_gdf[(active_gdf["pre_h"] == pre) & (active_gdf["post_h"] == post)]
-    sub = sub[~sub.geometry.is_empty & sub.geometry.notna()]
+    sub = sub[~sub.geometry.is_empty & sub.geometry.notna()][["pcb_id", "geometry"]]
+    have = set(sub["pcb_id"])
+
+    ev = events[(events["year"] == year) & events["mergid"].notna()]
+    need = set(ev["pcb_id"]) - have
+    if need:
+        fb = A.first_burn_polys(year, events)
+        if len(fb):
+            fb = fb[fb["pcb_id"].isin(need)]
+            sub = pd.concat([sub, fb[["pcb_id", "geometry"]]], ignore_index=True)
+    sub = gpd.GeoDataFrame(sub, geometry="geometry", crs=C.METRIC_CRS)
     ids = sorted(sub["pcb_id"].tolist())
-    params = {"win": [pre, post], "ids": ids, "split": C.LC_YEAR_SPLIT}
+    params = {"win": [pre, post], "ids": ids, "split": C.LC_YEAR_SPLIT,
+              "fallback": ["first", C.LC_BLOWUP_SPAN_H]}
 
     def build():
         if not len(sub):
@@ -133,6 +149,35 @@ def landcover_fractions_cached(year: int, active_gdf) -> pd.DataFrame:
         return LC.active_fractions(year, g["pcb_id"].tolist(), list(g.geometry))
 
     return C.cached("lcfrac", year, params, [LC._tif(year)], build)
+
+
+def firesim_cached(year: int, events: pd.DataFrame, linked) -> dict:
+    """{str(mergid): whole-fire evolution payload} for the year's pyroCb fires.
+
+    Returns a plain dict (not a frame), so it uses a small JSON cache keyed on the
+    firesim params, the pyroCb onsets and the NFP file stamps.
+    """
+    linked = {int(m) for m in linked}
+    ev = events[(events["year"] == year) & events["mergid"].notna()]
+    ev = ev[ev["mergid"].astype("int64").isin(linked)]
+    onsets = {int(m): sorted(str(pd.Timestamp(x)) for x in v)
+              for m, v in ev.groupby("mergid")["datetime"]}
+    key = C.params_hash({
+        "near": list(C.FIRESIM_PCB_NEAR_H), "grid": list(C.FIRESIM_GRID_M),
+        "bin": list(C.FIRESIM_BIN_H), "max": C.FIRESIM_MAX_PTS,
+        "onsets": onsets, "inputs": C._stamp(_inputs(year)), "code": C.CODE_VERSION})
+    C.CACHE_DIR.mkdir(exist_ok=True)
+    fp = C.CACHE_DIR / f"firesim_{year}_{key}.json"
+    if fp.exists():
+        try:
+            return json.loads(fp.read_text())
+        except Exception:
+            pass
+    for old in C.CACHE_DIR.glob(f"firesim_{year}_*.json"):
+        old.unlink()
+    d = FS.fire_series(year, {m: [pd.Timestamp(x) for x in v] for m, v in onsets.items()})
+    fp.write_text(json.dumps(d))
+    return d
 
 
 def run_year(year: int, verbose: bool = True):

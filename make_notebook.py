@@ -65,7 +65,7 @@ import pandas as pd
 
 import pyrocb
 from pyrocb import (config as C, io, timebins as T, matching, bands, active,
-                    variables, pipeline, landcover)
+                    variables, pipeline, landcover, firesim)
 
 pd.set_option("display.max_columns", 60)
 pd.set_option("display.width", 200)
@@ -223,7 +223,7 @@ for y in SNAP_YRS:
     s = active.summarise(active_geom[y])
     if len(s):
         e = e.merge(s, on="pcb_id", how="left")
-    lf = pipeline.landcover_fractions_cached(y, active_geom[y])
+    lf = pipeline.landcover_fractions_cached(y, active_geom[y], e)
     if len(lf) and lf.shape[1] > 1:
         e = e.merge(lf, on="pcb_id", how="left")
     _ev.append(e)
@@ -426,9 +426,16 @@ for y in YEARS:
     else:
         b64["lc"], _, glc = pack({"type": "FeatureCollection", "features": []})
 
+    # Whole-fire evolution series (first detection -> last), adaptively decimated:
+    # near-native around every pyroCb onset, coarse in the quiet spans between.
+    sim = pipeline.firesim_cached(y, events, linked) if (len(ev_y) and linked) else {}
+    b64["sim"], _, gsim = pack(sim)
+
     payloads[y] = b64
+    _nsim = sum(len(v["t"]) for v in sim.values())
     print(f"  {y}: {len(per_out):>6} perims  {len(ign_out):>6} ignitions  {len(pg):>3} pyroCb"
           f"  {0 if bg is None else len(bg):>3} bands  {len(px):>6} px  {glc/1e6:4.1f}MB lc"
+          f"  {len(sim):>3} fires {_nsim:>6} sim-px  {gsim/1e6:4.1f}MB sim"
           f"   packed {(gp+gi+gpx)/1e6:5.2f} MB", flush=True)
 
 # Fit the DOY window to the whole dataset, weighted by BURNED AREA. Weighting matters:
@@ -503,6 +510,13 @@ HTML = """<!DOCTYPE html>
   .legend .row{display:flex;align-items:center;gap:6px;margin:2px 0}
   .legend i{width:13px;height:13px;display:inline-block;border-radius:50%;flex:none;border:1px solid #666}
   .legend i.sq{border-radius:2px}
+  details.lcdd{margin-top:6px;border:1px solid #ddd;border-radius:4px}
+  details.lcdd>summary{cursor:pointer;padding:4px 7px;color:#444;font-weight:600;
+    list-style:none;user-select:none}
+  details.lcdd>summary::-webkit-details-marker{display:none}
+  details.lcdd>summary::before{content:"\25B8";color:#888;margin-right:5px}
+  details.lcdd[open]>summary::before{content:"\25BE"}
+  details.lcdd .body{padding:3px 7px 5px;max-height:190px;overflow:auto;border-top:1px solid #eee}
   #bar{height:11px;border-radius:2px;margin:3px 0 1px}
   #barlab{display:flex;justify-content:space-between;color:#666;font-size:10px}
   .pcblbl{font:700 10px system-ui;color:#fff;text-align:center;line-height:15px;
@@ -576,6 +590,9 @@ function hideNotice(){ noticeEl.style.display = "none"; }
 // the pyroCb), keyed by the globally unique pcb_id so a click works no matter which
 // years are toggled on. Each entry: {o:[lat,lon], dlat:[], dlon:[], hw:[], hh:[], t:[]}.
 const byPcbPix = {};
+// mergid -> whole-fire evolution series: {o:[lat,lon], t0, dur_h, pcb_h:[], dlat, dlon,
+// hw, hh, t:[h from first detection], tier:[0 native | 1 mid | 2 coarse], n_raw}.
+const byFireSim = {};
 let highlightLayer = null;
 function clearHighlight(){
   if (highlightLayer){ map.removeLayer(highlightLayer); highlightLayer = null; }
@@ -612,8 +629,41 @@ function drawPix(pid, loH, hiH, {fit=false, reuse=false}={}){
   } else {
     highlightLayer.clearLayers(); highlightLayer.addData(fc);
   }
-  if (fit && n){ try { map.fitBounds(highlightLayer.getBounds().pad(0.5), {maxZoom:11}); } catch(e){} }
+  if (fit && FIT_ON_SELECT && n){ try { map.fitBounds(highlightLayer.getBounds().pad(0.5), {maxZoom:11}); } catch(e){} }
   return {n, nb};
+}
+
+// ---- whole-fire evolution animation ------------------------------------
+const fmtDur = h => { const d = Math.floor(h/24);
+  return d ? d+" d "+Math.round(h-24*d)+" h" : Math.round(h)+" h"; };
+const FSIM_FILL = ["#ff7043","#ffb74d","#ffe0b2"];   // native / mid / coarse tier
+function fireSimWindow(mergid, loH, hiH){
+  const d = byFireSim[mergid];
+  if (!d) return {fc:{type:"FeatureCollection",features:[]}, n:0};
+  const [olat, olon] = d.o, feats = [];
+  for (let i = 0; i < d.t.length; i++){
+    const th = d.t[i];
+    if (th < loH || th > hiH) continue;
+    const lat = olat + d.dlat[i]/1e5, lon = olon + d.dlon[i]/1e5;
+    const dlat = d.hh[i]/DEG, dlon = d.hw[i]/(DEG*Math.cos(lat*Math.PI/180));
+    feats.push({type:"Feature", properties:{tier:d.tier[i]}, geometry:{type:"Polygon",
+      coordinates:[[[lon-dlon,lat-dlat],[lon+dlon,lat-dlat],[lon+dlon,lat+dlat],
+      [lon-dlon,lat+dlat],[lon-dlon,lat-dlat]]]}});
+  }
+  return {fc:{type:"FeatureCollection", features:feats}, n:feats.length};
+}
+function drawFireSim(mergid, loH, hiH, {fit=false, reuse=false}={}){
+  const {fc, n} = fireSimWindow(mergid, loH, hiH);
+  const style = f => ({stroke:false, fillColor:FSIM_FILL[f.properties.tier]||"#ff7043",
+    fillOpacity: f.properties.tier===0 ? 0.6 : 0.42});
+  if (!reuse || !highlightLayer){
+    clearHighlight();
+    highlightLayer = L.geoJSON(fc, {pane:"hl", renderer:R.hl, interactive:false, style}).addTo(map);
+  } else {
+    highlightLayer.clearLayers(); highlightLayer.addData(fc);
+  }
+  if (fit && FIT_ON_SELECT && n){ try { map.fitBounds(highlightLayer.getBounds().pad(0.3), {maxZoom:10}); } catch(e){} }
+  return n;
 }
 
 // Static wrapper used by popup mode and the panel's Static tab.
@@ -630,6 +680,7 @@ function renderActiveWindow(p, pre, post){
 
 // ---- bottom-left detail panel: static window slider + animation --------
 let DETAIL_MODE = "panel";            // "panel" | "popup"
+let FIT_ON_SELECT = false;            // pan/zoom the map to the event on select (opt-in)
 let PANEL_MODE  = "static";           // "static" | "animate"
 let winPre = 12, winPost = 12;        // sticky; grid {0,6,12,18,24}, sum >= 6
 let loopSec = 5, animStyle = "cumulative";   // "cumulative" | "sliding"
@@ -655,7 +706,8 @@ function openInfoPanel(p){
     +`<div class="bd"><div style="color:#666;margin-bottom:3px">${esc(p.fire_name||"unnamed fire")}`
     +(p.active_is_blowup?` &nbsp;<span class="warn">&#9888;&#65039; blow-up</span>`:"")
     +`</div><table>${rows(dt)}</table>`
-    +(lcTop3Html(p) ? `<div class="sl"><b>Land cover &mdash; 6 h pre-onset burn</b>`
+    +(lcTop3Html(p) ? `<div class="sl"><b>Land cover &mdash; `
+        +(p.active_is_blowup?`first 6 h of burning <span class="warn">(blow-up)</span>`:`6 h pre-onset burn`)+`</b>`
         +`<div style="color:#666;font-size:11px">top 3 classes &middot; native 30 m`
         +(p.lc_n_px!=null?` &middot; ${p.lc_n_px} cells`:"")+`</div>${lcTop3Html(p)}</div>` : "")
     +`<div class="sl"><b>Active burn</b> ${seg("pm","Static","Animate")}`
@@ -665,12 +717,18 @@ function openInfoPanel(p){
       +`<label>after &nbsp;<input type="range" id="slPost" min="0" max="24" step="6" value="${winPost}">`
       +`<span id="lbPost">${winPost}</span> h</label></div>`
     +`<div id="paneAnim" hidden>`
+      +`<label>scope <div class="seg"><button id="scA" class="on">&pm;24 h window</button>`
+        +`<button id="scB"${byFireSim[p.mergid]?"":" disabled title='no fire track for this event'"}>Whole fire</button></div></label>`
       +`<label><button id="play">&#9654; Play</button>`
       +`<span id="cur" style="margin-left:6px;font-weight:700"></span></label>`
-      +`<div style="height:6px;background:#eee;border-radius:3px;margin:3px 0">`
+      +`<div id="bartrack" style="position:relative;height:6px;background:#eee;border-radius:3px;margin:3px 0;overflow:hidden">`
         +`<div id="bar" style="height:6px;width:0;background:#ff9800;border-radius:3px"></div></div>`
       +`<label>loop ${seg("lp","3 s","5 s")}<button id="lp10" style="margin-left:0">10 s</button></label>`
-      +`<label>${seg("as","Cumulative","Sliding "+SLIDE_W+" h")}</label></div>`
+      +`<label>${seg("as","Cumulative","Sliding "+SLIDE_W+" h")}</label>`
+      +`<div id="tierkey" style="color:#666;font-size:11px" hidden>`
+        +`<span style="color:#ff7043">&#9632;</span> near a pyroCb (native) &nbsp;`
+        +`<span style="color:#ffb74d">&#9632;</span> &plusmn;72 h (1 km) &nbsp;`
+        +`<span style="color:#ffe0b2;text-shadow:0 0 1px #999">&#9632;</span> between (3 km)</div></div>`
     +`<div class="rd" id="rd"></div>`
     +`<div style="color:#666;font-size:11px">Orange = VIIRS detections, localised to this fire.</div>`
     +`</div></div>`;
@@ -702,15 +760,35 @@ function openInfoPanel(p){
   slPost.oninput = () => applyStatic("post");
 
   // animate
+  const fsim = byFireSim[p.mergid];
+  let animScope = "win";                                  // "win" | "fire"
+  const drawTicks = () => {
+    const tr = $("#bartrack");
+    tr.querySelectorAll("i.tick").forEach(e => e.remove());
+    if (animScope !== "fire" || !fsim) return;
+    fsim.pcb_h.forEach(h => { const i = document.createElement("i"); i.className = "tick";
+      i.style.cssText = `position:absolute;top:0;bottom:0;width:2px;background:#7d1128;`
+        + `left:${(100*h/Math.max(1,fsim.dur_h)).toFixed(2)}%`;
+      tr.appendChild(i); });
+  };
   const frame = ts => {
     if (!animT0) animT0 = ts;
     const u = ((ts - animT0) / (loopSec*1000)) % 1;      // 0..1 loop position
-    const cur = -24 + 48*u;                               // cursor hour
-    const loH = animStyle==="cumulative" ? -24 : cur - SLIDE_W;
-    const {n, nb} = drawPix(p.pcb_id, loH, cur, {reuse:true});
-    $("#cur").textContent = (cur>=0?"+":"") + cur.toFixed(1) + " h";
-    $("#bar").style.width = (u*100).toFixed(1) + "%";
-    setReadout(null, null, n, nb);
+    if (animScope === "fire" && fsim){
+      const cur = u * fsim.dur_h;                         // hours from first detection
+      const loH = animStyle==="cumulative" ? 0 : cur - SLIDE_W;
+      const n = drawFireSim(p.mergid, loH, cur, {reuse:true});
+      $("#cur").textContent = fmtDur(cur) + " / " + fmtDur(fsim.dur_h);
+      $("#bar").style.width = (u*100).toFixed(1) + "%";
+      rd.innerHTML = `${n} cells &middot; ${fsim.n_raw} raw detections &middot; t0 ${esc(fsim.t0)}`;
+    } else {
+      const cur = -24 + 48*u;                             // cursor hour
+      const loH = animStyle==="cumulative" ? -24 : cur - SLIDE_W;
+      const {n, nb} = drawPix(p.pcb_id, loH, cur, {reuse:true});
+      $("#cur").textContent = (cur>=0?"+":"") + cur.toFixed(1) + " h";
+      $("#bar").style.width = (u*100).toFixed(1) + "%";
+      setReadout(null, null, n, nb);
+    }
     animReq = requestAnimationFrame(frame);
   };
   const playBtn = $("#play");
@@ -727,13 +805,29 @@ function openInfoPanel(p){
     $("#lpA").classList.remove("on"); $("#lpB").classList.remove("on"); };
   pair("#asA","#asB", v=>{animStyle=v;}, "cumulative", "sliding");
 
+  const setScope = s => {
+    if (s === "fire" && !fsim) return;
+    animScope = s; animT0 = 0;
+    stopAnim(); playBtn.innerHTML = "&#9654; Play";
+    $("#scA").classList.toggle("on", s==="win"); $("#scB").classList.toggle("on", s==="fire");
+    $("#tierkey").hidden = s!=="fire";
+    drawTicks();
+    if (s === "fire") drawFireSim(p.mergid, 0, fsim.dur_h, {fit:true, reuse:false});
+    else drawPix(p.pcb_id, -24, 24, {fit:true, reuse:false});
+  };
+  $("#scA").onclick = () => setScope("win");
+  $("#scB").onclick = () => setScope("fire");
+
   $("#pmA").onclick = () => { PANEL_MODE="static"; stopAnim(); playBtn.innerHTML="&#9654; Play";
     $("#pmA").classList.add("on"); $("#pmB").classList.remove("on");
     $("#paneStatic").hidden=false; $("#paneAnim").hidden=true; applyStatic(); };
   $("#pmB").onclick = () => { PANEL_MODE="animate";
     $("#pmB").classList.add("on"); $("#pmA").classList.remove("on");
     $("#paneStatic").hidden=true; $("#paneAnim").hidden=false;
-    drawPix(p.pcb_id, -24, 24, {fit:true, reuse:false}); };
+    $("#tierkey").hidden = animScope!=="fire"; drawTicks();
+    (animScope==="fire" && fsim)
+      ? drawFireSim(p.mergid, 0, fsim.dur_h, {fit:true, reuse:false})
+      : drawPix(p.pcb_id, -24, 24, {fit:true, reuse:false}); };
 
   (PANEL_MODE==="animate" ? $("#pmB") : $("#pmA")).onclick();
 }
@@ -925,9 +1019,10 @@ function wanted(){
 async function ensureYear(y){
   if (cache[y]) return cache[y];
   const d = DATA[y];
-  const [per,ign,pcb,bnd,pix,lc] = await Promise.all(
-    [d.per,d.ign,d.pcb,d.bnd,d.pix,d.lc].map(unpack));
+  const [per,ign,pcb,bnd,pix,lc,sim] = await Promise.all(
+    [d.per,d.ign,d.pcb,d.bnd,d.pix,d.lc,d.sim].map(unpack));
   Object.assign(byPcbPix, pix);          // pcb_id -> per-detection arrays
+  Object.assign(byFireSim, sim);         // mergid -> whole-fire series
   cache[y] = buildLayers(y,{per,ign,pcb,bnd,lc});
   return cache[y];
 }
@@ -1010,6 +1105,7 @@ panel.onAdd = () => {
     </div>
     <div class="layers"><b style="font-size:11px">pyroCb click</b>
       <div class="seg"><button id="dPanel" class="on">Info panel</button><button id="dPopup">Popup</button></div>
+      <label><input type="checkbox" id="fitSel"> Zoom map to event on select</label>
       <div class="sub">Click a pyroCb: panel (bottom-left) with an active-burn window slider,
       or a popup on the marker.</div></div>`;
   L.DomEvent.disableClickPropagation(d); L.DomEvent.disableScrollPropagation(d);
@@ -1020,6 +1116,7 @@ panel.onAdd = () => {
   d.querySelectorAll("input[data-kind]").forEach(i=>i.onchange=()=>{
     showKind[i.dataset.kind]=i.checked; refresh(); if (i.dataset.kind==="lc") drawLegend();});
   d.querySelector("#hideOrp").onchange = e=>{hideOrphans=e.target.checked; refresh();};
+  d.querySelector("#fitSel").onchange = e=>{FIT_ON_SELECT=e.target.checked;};
   const my=d.querySelector("#mYear"), mdy=d.querySelector("#mDoy");
   my.onclick  = ()=>{MODE="year"; my.classList.add("on"); mdy.classList.remove("on"); recolour();};
   mdy.onclick = ()=>{MODE="doy";  mdy.classList.add("on"); my.classList.remove("on"); recolour();};
@@ -1070,10 +1167,12 @@ function drawLegend(){
     <div class="sub" style="margin-top:5px">Growth bands: pale core = burned before the first
     pyroCb, darker = later runs; the faintest outer band is after the last pyroCb.
     Click a pyroCb for its active-burn window &amp; animation.</div>`
-    + (showKind.lc ? `<details style="margin-top:6px"><summary style="cursor:pointer;color:#666">Land cover (1 km over fires, 10 km elsewhere)</summary>`
+    + (showKind.lc ? `<details class="lcdd"><summary>Land cover</summary><div class="body">`
         + [1,2,5,6,8,10,11,12,13,14,15,16,18].map(c =>
             `<div class="row"><i class="sq" style="background:${LC_COL[c]}"></i>${LC_LAB[c]}</div>`
-          ).join("") + `</details>` : "");
+          ).join("")
+        + `<div class="sub" style="margin-top:4px">1 km over fires, 10 km beyond.</div>`
+        + `</div></details>` : "");
   if (MODE==="year"){
     legendDiv.innerHTML = `<h4>Boreal fires &amp; pyroCb</h4>${common}
       <div class="sub" style="margin:6px 0 3px">Colour = year</div>
