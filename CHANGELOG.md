@@ -7,6 +7,53 @@ Rationale for each choice lives in [DECISIONS.md](DECISIONS.md); data discoverie
 
 ---
 
+## v0.14 — 2026-09-06 — native-resolution fire activity, canvas renderer, raster land cover
+
+A performance/resolution pass. Everything got **finer and smaller at the same time**, because
+all three hot paths were shipping the wrong representation.
+
+### Fixed
+* **Giant squares covering whole perimeters.** The whole-fire animation used to decimate
+  detections by proximity to a pyroCb onset and then *inflate each survivor to its dedup
+  cell* — so the quiet spans between events were drawn as 1 km and 3 km blocks, which on a
+  small fire swallowed the entire perimeter. Gone: fire activity is now a **375 m grid
+  everywhere** (one VIIRS pixel).
+
+### Added / changed
+* **Gridded burn-time payload** (`pyrocb/burngrid.py`). Detections snap to a 375 m grid built
+  in EPSG:3857, reduced to the time each cell first burned (whole-fire) or to unique
+  (cell, observation) pairs (±24 h window), sorted by time and delta-encoded.
+  2023: **393 k cells at 375 m in 0.64 MB** vs 276 k decimated points at 1–3 km in 1.7 MB —
+  **2.7× smaller and ~8× finer**. Because entries are time-sorted, every view the map offers
+  is a *contiguous index range*.
+* **Direct-to-canvas renderer** (`BurnLayer`, an `L.Renderer` subclass). Each frame used to
+  rebuild a GeoJSON FeatureCollection and hand it to Leaflet, which created a `Path` object
+  per box. Now a cell index becomes a canvas pixel with one multiply-add and a `fillRect`,
+  and because the visible slice is contiguous, **advancing the animation draws only the newly
+  revealed cells** instead of redrawing everything.
+* **Colour = burn age.** Cells are shaded on an ember→flame ramp keyed to absolute time, so
+  even a paused cumulative view shows the order the ground burned in. Free: cells are already
+  time-sorted, so the fill colour changes a handful of times per repaint.
+* **Media-player scrubber.** The animation is now a scrubbable cursor, not a captive loop:
+  drag the slider to any moment, pause, and step through detail. pyroCb onsets appear as
+  clickable diamonds above the scrubber — click one to jump straight to that event. Absolute
+  UTC timestamp shown alongside elapsed time.
+* **Custom loop duration**, 1–120 s, next to the 3/5/10/15/20 s presets.
+* **Land cover is now a paletted PNG overlay per fire** (`pyrocb/lcraster.py`), warped to
+  EPSG:3857 so Leaflet's placement is exact, with a 3×3 majority filter that is invisible at
+  map scale and takes ~35 % off the PNG. **~120 m over every fire + 5 km for ~1.9 MB** (2023),
+  against 1 km polygons for 1.1 MB — ~8× finer, GPU-composited, and it deletes the slow
+  `features.shapes` + dissolve + simplify path that dominated build time and threw topology
+  exceptions. The 10 km polygon backdrop beyond the fires stays.
+
+### Notes
+* `FIRESIM_*` and `LC_FINE_*` config are gone, replaced by `BURN_CELL_M`, `LC_PNG_MIN_M`,
+  `LC_PNG_CAP_PX`.
+* The exact 30 m land-cover composition per event (`active_fractions`) is untouched — that is
+  the science number and it was always read at native resolution.
+
+---
+
 ## v0.13 — 2026-09-06 — animation window/loop controls, native LC in the perimeter, pop flash
 
 ### Added

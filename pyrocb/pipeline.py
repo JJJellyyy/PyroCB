@@ -103,14 +103,12 @@ def active_cached(year: int, events: pd.DataFrame):
 
 
 def landcover_cached(year: int, mergids) -> "gpd.GeoDataFrame":
-    """Dissolved land-cover polygons: 1 km over the year's pyroCb fires + 5 km, and
-    10 km over the fire hull + a wide collar (the map's OSM replacement)."""
+    """Coarse (10 km) land-cover polygon backdrop around the year's pyroCb fires.
+    Everything closer in is a PNG overlay - see `lcpng_cached`."""
     mergids = sorted(int(m) for m in mergids)
-    params = {"cell": C.LC_CELL_M, "buf": C.LC_BUFFER_M, "simp": C.LC_SIMPLIFY_M,
-              "bg_cell": C.LC_BG_CELL_M, "bg_buf": C.LC_BG_BUFFER_M,
-              "bg_simp": C.LC_BG_SIMPLIFY_M, "nat_cell": C.LC_FINE_CELL_M,
-              "nat_simp": C.LC_FINE_SIMPLIFY_M, "nat_max": C.LC_FINE_MAX_KM2,
-              "split": C.LC_YEAR_SPLIT, "mergids": mergids}
+    params = {"buf": C.LC_BUFFER_M, "bg_cell": C.LC_BG_CELL_M,
+              "bg_buf": C.LC_BG_BUFFER_M, "bg_simp": C.LC_BG_SIMPLIFY_M,
+              "split": C.LC_YEAR_SPLIT, "mergids": mergids, "v": 2}
     tif = LC._tif(year)
 
     def build():
@@ -119,6 +117,43 @@ def landcover_cached(year: int, mergids) -> "gpd.GeoDataFrame":
         return LC.landcover_layer(year, list(g))
 
     return C.cached("landcover", year, params, [tif], build, geo=True)
+
+
+def lcpng_cached(year: int, mergids) -> dict:
+    """{str(mergid): {b, d}} paletted-PNG land-cover overlays, one per fire.
+
+    A dict of base64 blobs, so it uses the same small JSON cache as `firesim_cached`
+    rather than parquet.
+    """
+    mergids = sorted(int(m) for m in mergids)
+    params = {"buf": C.LC_BUFFER_M, "min_m": C.LC_PNG_MIN_M, "cap": C.LC_PNG_CAP_PX,
+              "split": C.LC_YEAR_SPLIT, "mergids": mergids}
+    return _json_cached("lcpng", year, params, [LC._tif(year)],
+                        lambda: _build_lcpng(year, mergids))
+
+
+def _build_lcpng(year: int, mergids) -> dict:
+    from . import lcraster
+    per = io.read_final(year).to_crs(3979)
+    sub = per[per["mergid"].isin(mergids)]
+    return lcraster.fire_overlays(year, sub["mergid"].tolist(), list(sub.geometry))
+
+
+def _json_cached(stage: str, year: int, params: dict, inputs, builder) -> dict:
+    """Cache a plain dict (not a frame) as JSON, keyed like `config.cached`."""
+    key = C.params_hash({"p": params, "inputs": C._stamp(inputs), "code": C.CODE_VERSION})
+    C.CACHE_DIR.mkdir(exist_ok=True)
+    fp = C.CACHE_DIR / f"{stage}_{year}_{key}.json"
+    if fp.exists():
+        try:
+            return json.loads(fp.read_text())
+        except Exception:
+            pass
+    for old in C.CACHE_DIR.glob(f"{stage}_{year}_*.json"):
+        old.unlink()
+    d = builder()
+    fp.write_text(json.dumps(d))
+    return d
 
 
 def landcover_fractions_cached(year: int, active_gdf, events: pd.DataFrame) -> pd.DataFrame:
@@ -168,22 +203,8 @@ def firesim_cached(year: int, events: pd.DataFrame, linked) -> dict:
             {"t": str(pd.Timestamp(r.datetime)), "lat": float(r.lat),
              "lon": float(r.lon), "id": str(r.pcb_id)}
             for r in g.sort_values("datetime").itertuples()]
-    key = C.params_hash({
-        "near": list(C.FIRESIM_PCB_NEAR_H), "grid": list(C.FIRESIM_GRID_M),
-        "bin": list(C.FIRESIM_BIN_H), "max": C.FIRESIM_MAX_PTS,
-        "onsets": onsets, "inputs": C._stamp(_inputs(year)), "code": C.CODE_VERSION})
-    C.CACHE_DIR.mkdir(exist_ok=True)
-    fp = C.CACHE_DIR / f"firesim_{year}_{key}.json"
-    if fp.exists():
-        try:
-            return json.loads(fp.read_text())
-        except Exception:
-            pass
-    for old in C.CACHE_DIR.glob(f"firesim_{year}_*.json"):
-        old.unlink()
-    d = FS.fire_series(year, onsets)
-    fp.write_text(json.dumps(d))
-    return d
+    return _json_cached("firesim", year, {"cell": C.BURN_CELL_M, "onsets": onsets},
+                        _inputs(year), lambda: FS.fire_series(year, onsets))
 
 
 def run_year(year: int, verbose: bool = True):

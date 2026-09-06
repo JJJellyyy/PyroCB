@@ -51,16 +51,22 @@ file); 90/300 m over all fires still ~7 MB. Shipped a compromise: **90 m inside 
 perimeters only** (bbox < 150 km²), whole file back to ~17 MB (D-39). The exact 30 m
 composition is still in the panel/table via `active_fractions`.
 
-**Open — a real 30 m *visual* everywhere needs a raster/tile path, not polygons:**
-- pre-render each fire's perimeter land cover to a small PNG, embed as a data-URI
-  `L.imageOverlay` (one per fire, clipped, ~30 m) — crisp, and a PNG of a 20 km scar at
-  30 m is far smaller than its polygonisation;
-- or a tiny embedded tile pyramid for the coarse national layer.
-Plus the still-open *national rough tier* and the smooth `cell = f(distance-to-pyroCb)`
-gradient.
+**Done (v0.14) — the raster path.** Pre-rendering each fire's land cover to a paletted PNG
+`L.imageOverlay` was the answer, exactly as sketched here: **~120 m over every fire + 5 km
+for ~1.9 MB** (2023), ~8× finer than the 1 km polygons it replaced, GPU-composited, and much
+faster to build. See D-42. Measured limits: RGBA kills palette compression (36 MB); a 512 px
+cap is 3.4 MB; a 3×3 majority filter is worth ~35 %.
 
-**Status:** inward tier shipped (small fires); national tier, gradient, and the raster
-path for a true 30 m visual are open.
+**Still open:**
+- **The national rough tier** — one ~25–50 km pass over the whole raster as an always-on
+  base, so land cover is visible between fires rather than only around them. Now cheap to
+  add as one more PNG per region.
+- **A smooth `cell = f(distance-to-pyroCb)` gradient** instead of the current fixed tiers
+  (~120 m PNG near fires, 10 km polygons beyond).
+- Pushing the per-fire PNG below 120 m: the cap is `LC_PNG_MIN_M` / `LC_PNG_CAP_PX`; 60 m
+  measured at ~3.8 MB for 2023 if that trade is ever worth it.
+
+**Status:** raster path shipped; national tier and gradient still open.
 
 ---
 

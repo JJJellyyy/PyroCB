@@ -88,26 +88,25 @@ def _grid_areas(core, cell_m=100.0) -> dict:
 
 
 def slider_data(year: int, events: pd.DataFrame):
-    """One localisation pass -> (area_grid, pixel_frame) for the map's window slider /
-    animation. `area_grid` is {pcb_id: {"pre_post": km2}}; `pixel_frame` is the
-    per-detection table (see below). Sharing `_cores` avoids re-grouping the NFP file.
+    """One localisation pass -> (area_grid, cell_grids) for the map's window slider /
+    animation. `area_grid` is {pcb_id: {"pre_post": km2}}; `cell_grids` is
+    {pcb_id: burngrid payload}. Sharing `_cores` avoids re-grouping the NFP file.
+
+    `collapse_first=False`: over a +/-24 h window a cell genuinely re-burns across
+    successive overpasses, and the static window view has to be exact, so entries are
+    unique (cell, observation time) rather than first-burn-only.
     """
-    cols = ["pcb_id", "lon", "lat", "hw", "hh", "t_rel_h", "before"]
-    grid, frames = {}, []
+    from . import burngrid
+    grid, cells = {}, {}
     for e, core in _cores(year, events):
         if core is None or core.get("empty"):
             continue
         grid[e["pcb_id"]] = _grid_areas(core)
-        ll = gpd.GeoSeries(gpd.points_from_xy(core["x"], core["y"]), crs=C.METRIC_CRS) \
-            .to_crs(C.WGS84)
-        frames.append(pd.DataFrame({
-            "pcb_id": e["pcb_id"],
-            "lon": ll.x.to_numpy().round(5), "lat": ll.y.to_numpy().round(5),
-            "hw": core["dx"].round(0), "hh": core["dy"].round(0),
-            "t_rel_h": core["t_rel_h"].round(2),
-            "before": core["t_rel_h"] < 0}))
-    px = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=cols)
-    return grid, px
+        enc = burngrid.encode(core["x"], core["y"], core["t_rel_h"] * 60.0,
+                              collapse_first=False)
+        if enc is not None:
+            cells[e["pcb_id"]] = enc
+    return grid, cells
 
 
 def first_burn_polys(year: int, events: pd.DataFrame, span_h: float = None) -> gpd.GeoDataFrame:

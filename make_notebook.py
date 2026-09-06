@@ -354,7 +354,7 @@ for y in YEARS:
 
     # Slider / animation data: one localisation pass gives the 24-window area lookup
     # and the per-detection table the map filters by time.
-    agrid, px = active.slider_data(y, ev_y) if len(ev_y) else ({}, pd.DataFrame())
+    agrid, px = active.slider_data(y, ev_y) if len(ev_y) else ({}, {})
     if agrid:
         pg["agrid"] = pg["pcb_id"].map(agrid)
 
@@ -402,19 +402,8 @@ for y in YEARS:
     else:
         b64["bnd"], _, _ = pack({"type": "FeatureCollection", "features": []})
 
-    # Per-detection pixels (widest window, localised) -> the map's slider / animation.
-    pixobj = {}
-    for pid, gg in px.groupby("pcb_id"):
-        olat, olon = round(float(gg.lat.mean()), 4), round(float(gg.lon.mean()), 4)
-        pixobj[pid] = {
-            "o": [olat, olon],
-            "dlat": ((gg.lat - olat) * 1e5).round().astype(int).tolist(),   # ~1.1 m
-            "dlon": ((gg.lon - olon) * 1e5).round().astype(int).tolist(),
-            "hw": gg.hw.round().astype(int).tolist(),
-            "hh": gg.hh.round().astype(int).tolist(),
-            "t": gg.t_rel_h.round(2).tolist(),
-        }
-    b64["pix"], _, gpx = pack(pixobj)
+    # +/-24 h cell grids (localised, 375 m, delta-coded) -> the slider / animation.
+    b64["pix"], _, gpx = pack(px)
 
     # Land cover over each pyroCb fire + 5 km, decimated to 1 km, dissolved by class.
     lc = pipeline.landcover_cached(y, linked) if linked else None
@@ -430,17 +419,26 @@ for y in YEARS:
     else:
         b64["lc"], _, glc = pack({"type": "FeatureCollection", "features": []})
 
-    # Whole-fire evolution series (first detection -> last), adaptively decimated:
-    # near-native around every pyroCb onset, coarse in the quiet spans between.
+    # Land cover close to each fire: paletted PNG overlays (see pyrocb/lcraster.py).
+    # Left un-gzipped: the payload is already base64 PNG, so packing it would just add
+    # a second base64 pass over incompressible bytes.
+    lcpng = pipeline.lcpng_cached(y, linked) if linked else {}
+    gpng = sum(len(v["d"]) for v in lcpng.values())
+    b64["lcpng"] = lcpng
+
+    # Whole-fire evolution: 375 m cell grid, first-burn time per cell.
     sim = pipeline.firesim_cached(y, events, linked) if (len(ev_y) and linked) else {}
     b64["sim"], _, gsim = pack(sim)
 
     payloads[y] = b64
-    _nsim = sum(len(v["t"]) for v in sim.values())
-    print(f"  {y}: {len(per_out):>6} perims  {len(ign_out):>6} ignitions  {len(pg):>3} pyroCb"
-          f"  {0 if bg is None else len(bg):>3} bands  {len(px):>6} px  {glc/1e6:4.1f}MB lc"
-          f"  {len(sim):>3} fires {_nsim:>6} sim-px  {gsim/1e6:4.1f}MB sim"
-          f"   packed {(gp+gi+gpx)/1e6:5.2f} MB", flush=True)
+    _nsim = sum(v["n_cell"] for v in sim.values())
+    _npix = sum(len(v["di"]) for v in px.values())
+    print(f"  {y}: {len(per_out):>6} perims  {len(ign_out):>6} ign  {len(pg):>3} pyroCb"
+          f"  {0 if bg is None else len(bg):>3} bands"
+          f" | pix {_npix:>7} cells {gpx/1e6:4.2f}MB"
+          f" | sim {len(sim):>3} fires {_nsim:>7} cells {gsim/1e6:4.2f}MB"
+          f" | lc {glc/1e6:4.2f}MB poly + {gpng/1e6:4.2f}MB png({len(lcpng)})",
+          flush=True)
 
 # Fit the DOY window to the whole dataset, weighted by BURNED AREA. Weighting matters:
 # an unweighted percentile over fire counts is dragged to (16, 349) by tiny January crop
@@ -525,6 +523,8 @@ HTML = """<!DOCTYPE html>
   #barlab{display:flex;justify-content:space-between;color:#666;font-size:10px}
   .pcblbl{font:700 10px system-ui;color:#fff;text-align:center;line-height:15px;
           text-shadow:0 0 2px #000,0 0 2px #000}
+  /* categorical raster: never interpolate between class colours */
+  .lcimg{image-rendering:pixelated;image-rendering:crisp-edges}
   .ignstar{position:relative}
   .ignstar svg{display:block}
   .ignstar span{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
@@ -560,7 +560,19 @@ HTML = """<!DOCTYPE html>
   #info .seg button:last-child{border-radius:0 4px 4px 0}
   #info .seg button+button{border-left:none}
   #info .seg button.on{background:#333;color:#fff;border-color:#333}
-  #info #play{border-radius:4px}
+  #info #play{border-radius:4px;min-width:32px;font-size:12px}
+  #info .player{display:flex;align-items:center;gap:8px;margin:6px 0 1px}
+  #info #cur{font-weight:700;white-space:nowrap}
+  #info #curabs{color:#666;font-size:11px;white-space:nowrap}
+  #info #scrubwrap{position:relative;margin:7px 0 4px}
+  #info #scrub{width:100%;margin:0;display:block}
+  #info #ticks{position:absolute;left:0;right:0;top:-7px;height:10px;pointer-events:none}
+  #info #ticks b{position:absolute;top:0;width:8px;height:8px;margin-left:-4px;
+     background:#7d1128;border:1px solid #fff;border-radius:2px;transform:rotate(45deg);
+     cursor:pointer;pointer-events:auto;box-shadow:0 0 2px rgba(0,0,0,.5)}
+  #info #ticks b:hover{background:#e11;transform:rotate(45deg) scale(1.35)}
+  #info #loopCustom{width:46px;margin-left:6px;font:11px system-ui;padding:2px 4px;
+     border:1px solid #bbb;border-radius:4px}
   @keyframes pcbpulse{0%{transform:scale(.3);opacity:.9}100%{transform:scale(3.4);opacity:0}}
   .pcbpulse{box-sizing:border-box;width:22px;height:22px;border:3px solid #7d1128;
      border-radius:50%;animation:pcbpulse 1.1s ease-out forwards}
@@ -597,89 +609,165 @@ function hideNotice(){ noticeEl.style.display = "none"; }
 // the pyroCb), keyed by the globally unique pcb_id so a click works no matter which
 // years are toggled on. Each entry: {o:[lat,lon], dlat:[], dlon:[], hw:[], hh:[], t:[]}.
 const byPcbPix = {};
-// mergid -> whole-fire evolution series: {o:[lat,lon], t0, dur_h, pcb_h:[], dlat, dlon,
-// hw, hh, t:[h from first detection], tier:[0 native | 1 mid | 2 coarse], n_raw}.
+// mergid -> whole-fire series {t0, dur_h, pcb_h, pcb_ll, pcb_id, g, n_raw, n_cell}.
 const byFireSim = {};
-let highlightLayer = null;
-function clearHighlight(){
-  if (highlightLayer){ map.removeLayer(highlightLayer); highlightLayer = null; }
+
+// ---- fire-activity grid ---------------------------------------------------
+// Payloads are delta-coded, TIME-SORTED cell grids in Web Mercator (burngrid.py).
+// Time-sorted is the whole trick: every view the map offers - cumulative up to t, a
+// sliding window, a static -pre..+post window - is a CONTIGUOUS index range. So the
+// canvas can draw the newly-revealed slice on top of what is already there instead of
+// rebuilding thousands of Leaflet paths sixty times a second.
+const R_MERC = 6378137.0, MERC_K = 1/(2*Math.PI*R_MERC);
+const _decoded = new WeakMap();
+function decodeGrid(p){
+  if (!p) return null;
+  let d = _decoded.get(p);
+  if (d) return d;
+  const n = p.di.length;
+  const ix = new Int32Array(n), iy = new Int32Array(n), t = new Float32Array(n);
+  let a = 0, b = 0, c = 0;
+  for (let k = 0; k < n; k++){
+    a += p.di[k]; b += p.dj[k]; c += p.dt[k];
+    ix[k] = a; iy[k] = b; t[k] = c/60;              // minutes -> hours
+  }
+  d = {n, ix, iy, t, ox:p.ox, oy:p.oy, c:p.c};
+  _decoded.set(p, d);
+  return d;
 }
-let popLayer = null;   // "a pyroCb popped" markers during whole-fire animation
+// t is ascending: first index with t > v  /  first index with t >= v
+function ubound(t, n, v){ let lo=0, hi=n; while(lo<hi){const m=(lo+hi)>>1; if(t[m]<=v) lo=m+1; else hi=m;} return lo; }
+function lbound(t, n, v){ let lo=0, hi=n; while(lo<hi){const m=(lo+hi)>>1; if(t[m]< v) lo=m+1; else hi=m;} return lo; }
+
+// Burn age ramp: embers (earliest) -> active flame (latest). Cells are time-sorted so
+// the colour only changes a handful of times per repaint, and because the ramp is keyed
+// to absolute time (not the visible range) incremental drawing stays correct.
+const BURN_RAMP = ["#4a1109","#7d1e0b","#a82c0d","#cc3f10","#e35814","#f2741b",
+                   "#fb8c26","#ff9f33","#ffb245","#ffc45c","#ffd479","#ffe6a8"];
+
+// Subclasses L.Renderer rather than L.Layer so Leaflet's own container positioning
+// and zoom-animation transform bookkeeping come for free - the same machinery L.Canvas
+// uses. Like L.Canvas we translate the context by -bounds.min and then draw in LAYER
+// coordinates, which is exactly where the mercator->pixel transform lands.
+const BurnLayer = L.Renderer.extend({
+  initialize(opts){
+    L.Renderer.prototype.initialize.call(this, opts);
+    this._g=null; this._range=[0,0]; this._drawn=null; this._span=1; this._t0=0;
+  },
+  _initContainer(){
+    const c = this._container = document.createElement("canvas");
+    c.style.pointerEvents = "none";
+    this._ctx = c.getContext("2d");
+  },
+  _destroyContainer(){
+    L.Util.cancelAnimFrame(this._redrawRequest);
+    delete this._ctx;
+    L.DomUtil.remove(this._container);
+    L.DomEvent.off(this._container);
+    delete this._container;
+  },
+  setGrid(grid, span, t0){
+    this._g = grid; this._span = Math.max(1e-6, span||1); this._t0 = t0||0;
+    this._range = [0,0]; this._drawn = null; this._blank();
+  },
+  clear(){ this._g = null; this._range=[0,0]; this._drawn=null; this._blank(); },
+  _onZoomEnd(){},                       // Renderer binds this; only L.Canvas defines it
+  count(){ return this._range[1] - this._range[0]; },
+  setRange(i0, i1){
+    if (!this._g) return 0;
+    i1 = Math.max(i0, i1);
+    const d = this._drawn;
+    if (d && d[0] === i0 && i1 >= d[1]) this._paint(d[1], i1);   // extend: draw only the new slice
+    else { this._blank(); this._paint(i0, i1); }
+    this._range = [i0, i1]; this._drawn = [i0, i1];
+    return i1 - i0;
+  },
+  _blank(){
+    if (!this._ctx || !this._bounds) return;
+    const b = this._bounds, s = b.getSize();
+    this._ctx.clearRect(b.min.x, b.min.y, s.x, s.y);
+  },
+  _update(){
+    if (this._map._animatingZoom && this._bounds) return;
+    L.Renderer.prototype._update.call(this);
+    const b = this._bounds, size = b.getSize(), c = this._container;
+    L.DomUtil.setPosition(c, b.min);
+    c.width = size.x; c.height = size.y;
+    c.style.width = size.x + "px"; c.style.height = size.y + "px";
+    this._ctx.setTransform(1, 0, 0, 1, 0, 0);
+    this._ctx.translate(-b.min.x, -b.min.y);      // draw in layer coordinates
+    // Web Mercator metres -> layer point is a pure scale+offset, so a cell index
+    // becomes a pixel with one multiply-add. No per-feature projection, ever.
+    const scale = 256 * Math.pow(2, this._map.getZoom()), o = this._map.getPixelOrigin();
+    this._A  = scale * MERC_K;
+    this._Bx = 0.5*scale - o.x;
+    this._By = 0.5*scale - o.y;
+    const r = this._range;
+    this._drawn = null; this._blank(); this._paint(r[0], r[1]); this._drawn = [r[0], r[1]];
+  },
+  _paint(i0, i1){
+    const g = this._g;
+    if (!g || !this._ctx || !this._bounds || i1 <= i0) return;
+    const ctx = this._ctx, b = this._bounds;
+    const S = g.c * this._A, PX = g.ox*this._A + this._Bx, PY = -g.oy*this._A + this._By;
+    const w = Math.max(1, S + 0.6);
+    const x0 = b.min.x - w, x1 = b.max.x, y0 = b.min.y - w, y1 = b.max.y;
+    const ix = g.ix, iy = g.iy, t = g.t, span = this._span, t0 = this._t0;
+    ctx.globalAlpha = 0.66;
+    let band = -1;
+    for (let k = i0; k < i1; k++){
+      const bnd = Math.min(BURN_RAMP.length-1,
+                           Math.max(0, ((t[k]-t0)/span*BURN_RAMP.length)|0));
+      if (bnd !== band){ band = bnd; ctx.fillStyle = BURN_RAMP[bnd]; }
+      const x = ix[k]*S + PX, y = PY - (iy[k]+1)*S;
+      if (x < x0 || y < y0 || x > x1 || y > y1) continue;
+      ctx.fillRect(x, y, w, w);
+    }
+    ctx.globalAlpha = 1;
+  },
+  gridBounds(){
+    const g = this._g;
+    if (!g || !g.n) return null;
+    let a=g.ix[0],A=a,b=g.iy[0],B=b;
+    for (let k=1;k<g.n;k++){
+      if(g.ix[k]<a)a=g.ix[k]; if(g.ix[k]>A)A=g.ix[k];
+      if(g.iy[k]<b)b=g.iy[k]; if(g.iy[k]>B)B=g.iy[k];
+    }
+    const ll = (i,j) => { const mx=g.ox+i*g.c, my=g.oy+j*g.c;
+      return [ (2*Math.atan(Math.exp(my/R_MERC)) - Math.PI/2) * 180/Math.PI,
+               mx/R_MERC * 180/Math.PI ]; };
+    return L.latLngBounds(ll(a,b), ll(A+1,B+1));
+  },
+});
+let burn = null;                       // the single BurnLayer instance (created with the map)
+function clearHighlight(){ if (burn) burn.clear(); }
+let popLayer = null;                   // "a pyroCb popped" markers during whole-fire animation
 function clearPops(){
   if (popLayer){ map.removeLayer(popLayer); popLayer = null; }
 }
-const DEG = 111320;   // metres per degree latitude (good enough at 45-72N for 375 m boxes)
-
-// Detections of one event with onset-relative time in [loH, hiH], as box features.
-function pixWindow(pid, loH, hiH){
-  const d = byPcbPix[pid];
-  if (!d) return {fc:{type:"FeatureCollection",features:[]}, n:0, nb:0};
-  const [olat, olon] = d.o, feats = [];
-  let nb = 0;
-  for (let i = 0; i < d.t.length; i++){
-    const th = d.t[i];
-    if (th < loH || th > hiH) continue;
-    if (th < 0) nb++;
-    const lat = olat + d.dlat[i]/1e5, lon = olon + d.dlon[i]/1e5;
-    const dlat = d.hh[i]/DEG, dlon = d.hw[i]/(DEG*Math.cos(lat*Math.PI/180));
-    feats.push({type:"Feature", properties:{}, geometry:{type:"Polygon", coordinates:[[
-      [lon-dlon,lat-dlat],[lon+dlon,lat-dlat],[lon+dlon,lat+dlat],
-      [lon-dlon,lat+dlat],[lon-dlon,lat-dlat]]]}});
-  }
-  return {fc:{type:"FeatureCollection", features:feats}, n:feats.length, nb};
-}
-
-const HL_STYLE = {stroke:false, fillColor:"#ff9800", fillOpacity:0.5};
-// Draw/replace the highlight for [loH,hiH]. reuse=true keeps the same layer (animation).
-function drawPix(pid, loH, hiH, {fit=false, reuse=false}={}){
-  const {fc, n, nb} = pixWindow(pid, loH, hiH);
-  if (!reuse || !highlightLayer){
-    clearHighlight();
-    highlightLayer = L.geoJSON(fc, {pane:"hl", renderer:R.hl, interactive:false,
-      style:()=>HL_STYLE}).addTo(map);
-  } else {
-    highlightLayer.clearLayers(); highlightLayer.addData(fc);
-  }
-  if (fit && FIT_ON_SELECT && n){ try { map.fitBounds(highlightLayer.getBounds().pad(0.5), {maxZoom:11}); } catch(e){} }
-  return {n, nb};
-}
-
-// ---- whole-fire evolution animation ------------------------------------
 const fmtDur = h => { const d = Math.floor(h/24);
   return d ? d+" d "+Math.round(h-24*d)+" h" : Math.round(h)+" h"; };
-const FSIM_FILL = ["#ff7043","#ffb74d","#ffe0b2"];   // native / mid / coarse tier
-function fireSimWindow(mergid, loH, hiH){
-  const d = byFireSim[mergid];
-  if (!d) return {fc:{type:"FeatureCollection",features:[]}, n:0};
-  const [olat, olon] = d.o, feats = [];
-  for (let i = 0; i < d.t.length; i++){
-    const th = d.t[i];
-    if (th < loH || th > hiH) continue;
-    const lat = olat + d.dlat[i]/1e5, lon = olon + d.dlon[i]/1e5;
-    const dlat = d.hh[i]/DEG, dlon = d.hw[i]/(DEG*Math.cos(lat*Math.PI/180));
-    feats.push({type:"Feature", properties:{tier:d.tier[i]}, geometry:{type:"Polygon",
-      coordinates:[[[lon-dlon,lat-dlat],[lon+dlon,lat-dlat],[lon+dlon,lat+dlat],
-      [lon-dlon,lat+dlat],[lon-dlon,lat-dlat]]]}});
+
+// Show a grid over an inclusive time range; returns {n, nb} (cells, cells before onset).
+function showGrid(payload, lo, hi, span, t0, {fit=false}={}){
+  const g = decodeGrid(payload);
+  if (!burn) return {n:0, nb:0};
+  if (!g){ burn.clear(); return {n:0, nb:0}; }
+  if (burn._g !== g) burn.setGrid(g, span, t0);
+  else { burn._span = Math.max(1e-6, span||1); burn._t0 = t0||0; }
+  const i0 = lbound(g.t, g.n, lo), i1 = ubound(g.t, g.n, hi);
+  const n = burn.setRange(i0, i1);
+  const z = Math.min(Math.max(lbound(g.t, g.n, 0), i0), i1);
+  if (fit && FIT_ON_SELECT && n){
+    const bb = burn.gridBounds();
+    if (bb) try { map.fitBounds(bb.pad(0.25), {maxZoom:11}); } catch(e){}
   }
-  return {fc:{type:"FeatureCollection", features:feats}, n:feats.length};
-}
-function drawFireSim(mergid, loH, hiH, {fit=false, reuse=false}={}){
-  const {fc, n} = fireSimWindow(mergid, loH, hiH);
-  const style = f => ({stroke:false, fillColor:FSIM_FILL[f.properties.tier]||"#ff7043",
-    fillOpacity: f.properties.tier===0 ? 0.6 : 0.42});
-  if (!reuse || !highlightLayer){
-    clearHighlight();
-    highlightLayer = L.geoJSON(fc, {pane:"hl", renderer:R.hl, interactive:false, style}).addTo(map);
-  } else {
-    highlightLayer.clearLayers(); highlightLayer.addData(fc);
-  }
-  if (fit && FIT_ON_SELECT && n){ try { map.fitBounds(highlightLayer.getBounds().pad(0.3), {maxZoom:10}); } catch(e){} }
-  return n;
+  return {n, nb: z - i0};
 }
 
 // Static wrapper used by popup mode and the panel's Static tab.
 function renderActiveWindow(p, pre, post){
-  const {n, nb} = drawPix(p.pcb_id, -pre, post, {fit:true});
+  const {n, nb} = showGrid(byPcbPix[p.pcb_id], -pre, post, 48, -24, {fit:true});
   if (p.active_is_blowup){
     showNotice("warn", `<b>&#9888; Blow-up fire</b> No VIIRS detections before onset &mdash; `
       +`first seen by the overpass <i>after</i> the pyroCb (FINDINGS F4). This is post-onset burning.`);
@@ -697,7 +785,7 @@ let winPre = 12, winPost = 12;        // sticky; grid {0,6,12,18,24}, sum >= 6
 let loopSec = 5, animStyle = "cumulative", slideW = 6;   // slideW = sliding-window width (h)
 const infoEl = document.getElementById("info");
 L.DomEvent.disableClickPropagation(infoEl); L.DomEvent.disableScrollPropagation(infoEl);
-let animReq = null, animT0 = 0;
+let animReq = null;
 function stopAnim(){ if (animReq){ cancelAnimationFrame(animReq); animReq = null; } }
 function closeInfo(){ stopAnim(); infoEl.style.display = "none"; clearHighlight(); clearPops(); hideNotice(); }
 
@@ -729,21 +817,25 @@ function openInfoPanel(p){
     +`<div id="paneAnim" hidden>`
       +`<label>scope <div class="seg"><button id="scA" class="on">&pm;24 h window</button>`
         +`<button id="scB"${byFireSim[p.mergid]?"":" disabled title='no fire track for this event'"}>Whole fire</button></div></label>`
-      +`<label><button id="play">&#9654; Play</button>`
-      +`<span id="cur" style="margin-left:6px;font-weight:700"></span></label>`
-      +`<div id="bartrack" style="position:relative;height:6px;background:#eee;border-radius:3px;margin:3px 0;overflow:hidden">`
-        +`<div id="bar" style="height:6px;width:0;background:#ff9800;border-radius:3px"></div></div>`
+      +`<div class="player"><button id="play" title="play / pause">&#9654;</button>`
+        +`<span id="cur"></span><span id="curabs"></span></div>`
+      +`<div id="scrubwrap"><div id="ticks"></div>`
+        +`<input type="range" id="scrub" min="0" max="1000" step="1" value="0"`
+        +` title="drag to scrub through the event"></div>`
       +`<label>loop <span class="seg" id="loopSeg">`
-        + [3,5,10,15,20].map(s=>`<button data-s="${s}">${s} s</button>`).join("") + `</span></label>`
+        + [3,5,10,15,20].map(s=>`<button data-s="${s}">${s}s</button>`).join("") + `</span>`
+        +`<input type="number" id="loopCustom" min="1" max="120" step="1" placeholder="s"`
+        +` title="custom loop length, 1-120 s"></label>`
       +`<label>${seg("as","Cumulative","Sliding")}</label>`
       +`<label id="slwRow" hidden>window <span class="seg" id="slwSeg">`
         + [6,24,48,168].map(s=>`<button data-h="${s}">${s>=168?"1 wk":s+" h"}</button>`).join("") + `</span></label>`
       +`<div id="tierkey" style="color:#666;font-size:11px" hidden>`
-        +`<span style="color:#ff7043">&#9632;</span> near a pyroCb (native) &nbsp;`
-        +`<span style="color:#ffb74d">&#9632;</span> &plusmn;72 h (1 km) &nbsp;`
-        +`<span style="color:#ffe0b2;text-shadow:0 0 1px #999">&#9632;</span> between (3 km)</div></div>`
+        +`Colour = burn age: <span style="color:#4a1109">&#9632;</span> first`
+        +` &rarr; <span style="color:#ffe6a8;text-shadow:0 0 1px #999">&#9632;</span> last.`
+        +` Click a <span style="color:#7d1128">&#9670;</span> to jump to that pyroCb.</div></div>`
     +`<div class="rd" id="rd"></div>`
-    +`<div style="color:#666;font-size:11px">Orange = VIIRS detections, localised to this fire.</div>`
+    +`<div style="color:#666;font-size:11px">VIIRS active fire on a 375 m grid,`
+    +` localised to this fire.</div>`
     +`</div></div>`;
   infoEl.style.display = "block";
   infoEl.querySelector(".x").onclick = closeInfo;
@@ -754,7 +846,7 @@ function openInfoPanel(p){
     let km2 = null;
     if (loH === -winPre && hiH === winPost) km2 = (p.agrid||{})[winPre+"_"+winPost];
     rd.innerHTML = n
-      ? `${km2!=null?km2.toFixed(1)+" km&sup2; &middot; ":""}${n} detections `
+      ? `${km2!=null?km2.toFixed(1)+" km&sup2; &middot; ":""}${n} cells `
         +`(${nb} before / ${n-nb} after onset)`
       : `no detections in this window`;
   };
@@ -772,19 +864,41 @@ function openInfoPanel(p){
   slPre.oninput = () => applyStatic("pre");
   slPost.oninput = () => applyStatic("post");
 
-  // animate
+  // ---- animate: a scrubbable cursor, not a captive loop ---------------------
+  // `animU` in [0,1] is the single source of truth. Playing advances it by elapsed
+  // time; the scrubber and the pyroCb ticks set it directly. So pausing, scrubbing
+  // and jumping to an event all work without special cases.
   const fsim = byFireSim[p.mergid];
-  let animScope = "win";                                  // "win" | "fire"
-  let prevCur = null;                                     // for "a pyroCb just popped" detection
+  let animScope = "win";                 // "win" | "fire"
+  let animU = 0, lastTs = 0, prevCur = null;
+  const scrub = $("#scrub"), playBtn = $("#play");
+  const spanOf = () => (animScope === "fire" && fsim) ? Math.max(1e-6, fsim.dur_h) : 48;
+  const t0Of   = () => (animScope === "fire" && fsim) ? 0 : -24;
+  const curOf  = u => t0Of() + u * spanOf();
+
+  function pause(){ stopAnim(); lastTs = 0; playBtn.innerHTML = "&#9654;"; }
+  function play(){
+    if (animReq) return;
+    if (animU >= 0.999){ animU = 0; prevCur = null; }     // restart from a finished run
+    lastTs = 0; playBtn.innerHTML = "&#10073;&#10073;";
+    animReq = requestAnimationFrame(frame);
+  }
+
+  // pyroCb markers over the scrubber; click one to jump straight to that onset.
   const drawTicks = () => {
-    const tr = $("#bartrack");
-    tr.querySelectorAll("i.tick").forEach(e => e.remove());
+    const tr = $("#ticks");
+    tr.innerHTML = "";
     if (animScope !== "fire" || !fsim) return;
-    fsim.pcb_h.forEach(h => { const i = document.createElement("i"); i.className = "tick";
-      i.style.cssText = `position:absolute;top:0;bottom:0;width:2px;background:#7d1128;`
-        + `left:${(100*h/Math.max(1,fsim.dur_h)).toFixed(2)}%`;
-      tr.appendChild(i); });
+    fsim.pcb_h.forEach((h, i) => {
+      const b = document.createElement("b");
+      b.title = fsim.pcb_id[i] + "  (" + fmtDur(h) + ")";
+      b.style.left = (100 * h / spanOf()).toFixed(3) + "%";
+      b.onclick = ev => { ev.preventDefault(); ev.stopPropagation();
+        pause(); animU = Math.min(1, Math.max(0, h / spanOf())); prevCur = null; render(); };
+      tr.appendChild(b);
+    });
   };
+
   // dark-red dot at every pyroCb whose onset has been reached; a pulsing ring on the
   // one that just fired this frame (flashIdx).
   const renderPops = (cur, flashIdx) => {
@@ -794,23 +908,23 @@ function openInfoPanel(p){
     for (let i = 0; i < fsim.pcb_h.length; i++){
       if (fsim.pcb_h[i] > cur) continue;
       const ll = fsim.pcb_ll[i];
-      L.circleMarker(ll, {pane:"hl", renderer:R.hl, radius:4, color:"#7d1128",
-        weight:2, fillColor:"#7d1128", fillOpacity:1}).addTo(popLayer);
+      L.circleMarker(ll, {pane:"pop", renderer:R.pop, radius:4, color:"#fff",
+        weight:1.5, fillColor:"#7d1128", fillOpacity:1}).addTo(popLayer);
       if (i === flashIdx)
-        L.marker(ll, {icon:L.divIcon({className:"", iconSize:[22,22], iconAnchor:[11,11],
-          html:'<div class="pcbpulse"></div>'})}).addTo(popLayer);
+        L.marker(ll, {pane:"pop", icon:L.divIcon({className:"", iconSize:[22,22],
+          iconAnchor:[11,11], html:'<div class="pcbpulse"></div>'})}).addTo(popLayer);
     }
   };
-  const frame = ts => {
-    if (!animT0) animT0 = ts;
-    const u = ((ts - animT0) / (loopSec*1000)) % 1;      // 0..1 loop position
+
+  function render(){
+    const cur = curOf(animU), lo = animStyle === "cumulative" ? t0Of() : cur - slideW;
     if (animScope === "fire" && fsim){
-      const cur = u * fsim.dur_h;                         // hours from first detection
-      const loH = animStyle==="cumulative" ? 0 : cur - slideW;
-      const n = drawFireSim(p.mergid, loH, cur, {reuse:true});
+      const n = showGrid(fsim.g, lo, cur, fsim.dur_h, 0).n;
       $("#cur").textContent = fmtDur(cur) + " / " + fmtDur(fsim.dur_h);
-      $("#bar").style.width = (u*100).toFixed(1) + "%";
-      rd.innerHTML = `${n} cells &middot; ${fsim.n_raw} raw detections &middot; t0 ${esc(fsim.t0)}`;
+      const ms = Date.parse(fsim.t0.replace(" ", "T") + "Z") + cur*3600e3;
+      $("#curabs").textContent = isNaN(ms) ? ""
+        : new Date(ms).toISOString().slice(0,16).replace("T", " ") + " UTC";
+      rd.innerHTML = `${n} of ${fsim.n_cell} cells &middot; ${fsim.n_raw} raw detections`;
       if (prevCur === null || cur < prevCur) prevCur = cur;   // init / loop wrap: no flash
       let flash = -1;
       for (let i = 0; i < fsim.pcb_h.length; i++)
@@ -821,21 +935,23 @@ function openInfoPanel(p){
         rd.innerHTML = `<b style="color:#7d1128">&#9733; pyroCb &mdash; ${esc(fsim.pcb_id[flash])}</b>`
           + ` &middot; ${fmtDur(cur)}`;
     } else {
-      const cur = -24 + 48*u;                             // cursor hour
-      const loH = animStyle==="cumulative" ? -24 : cur - slideW;
-      const {n, nb} = drawPix(p.pcb_id, loH, cur, {reuse:true});
-      $("#cur").textContent = (cur>=0?"+":"") + cur.toFixed(1) + " h";
-      $("#bar").style.width = (u*100).toFixed(1) + "%";
+      const {n, nb} = showGrid(byPcbPix[p.pcb_id], lo, cur, 48, -24);
+      $("#cur").textContent = (cur >= 0 ? "+" : "") + cur.toFixed(1) + " h";
+      $("#curabs").textContent = "";
       setReadout(null, null, n, nb);
     }
+    scrub.value = Math.round(animU * 1000);
+  }
+
+  const frame = ts => {
+    if (lastTs) animU = (animU + (ts - lastTs) / (loopSec * 1000)) % 1;
+    lastTs = ts;
+    render();
     animReq = requestAnimationFrame(frame);
   };
-  const playBtn = $("#play");
-  playBtn.onclick = () => {
-    if (animReq){ stopAnim(); playBtn.innerHTML = "&#9654; Play"; }
-    else { animT0 = 0; prevCur = null; playBtn.innerHTML = "&#10073;&#10073; Pause";
-      animReq = requestAnimationFrame(frame); }
-  };
+  playBtn.onclick = () => animReq ? pause() : play();
+  scrub.oninput = () => { pause(); animU = (+scrub.value)/1000; prevCur = null; render(); };
+
   const pair = (aId,bId,set,va,vb) => {
     $(aId).onclick = () => { set(va); $(aId).classList.add("on"); $(bId).classList.remove("on"); };
     $(bId).onclick = () => { set(vb); $(bId).classList.add("on"); $(aId).classList.remove("on"); };
@@ -846,37 +962,42 @@ function openInfoPanel(p){
     const mark = v => bs.forEach(b => b.classList.toggle("on", +b.dataset[attr] === v));
     bs.forEach(b => b.onclick = () => { const v = +b.dataset[attr]; onPick(v); mark(v); });
     mark(cur);
+    return mark;
   };
-  radio($("#loopSeg"), "s", loopSec, v => { loopSec = v; animT0 = 0; });
-  radio($("#slwSeg"), "h", slideW, v => { slideW = v; animT0 = 0; });
-  pair("#asA","#asB", v=>{ animStyle = v; animT0 = 0;
-    $("#slwRow").hidden = v !== "sliding"; }, "cumulative", "sliding");
+  const markLoop = radio($("#loopSeg"), "s", loopSec, v => { loopSec = v; cust.value = ""; });
+  const cust = $("#loopCustom");
+  cust.oninput = () => {
+    const v = Math.round(+cust.value);
+    if (v >= 1 && v <= 120){ loopSec = v; markLoop(-1); }   // -1 clears every preset
+  };
+  radio($("#slwSeg"), "h", slideW, v => { slideW = v; render(); });
+  pair("#asA","#asB", v => { animStyle = v; $("#slwRow").hidden = v !== "sliding"; render(); },
+       "cumulative", "sliding");
 
   const setScope = s => {
-    if (s === "fire" && !fsim) return;
-    animScope = s; animT0 = 0; prevCur = null;
-    stopAnim(); playBtn.innerHTML = "&#9654; Play";
-    $("#scA").classList.toggle("on", s==="win"); $("#scB").classList.toggle("on", s==="fire");
-    $("#tierkey").hidden = s!=="fire";
+    if (s === "fire" && !fsim) s = "win";
+    animScope = s; prevCur = null; pause();
+    $("#scA").classList.toggle("on", s === "win"); $("#scB").classList.toggle("on", s === "fire");
+    $("#tierkey").hidden = s !== "fire";
+    if (s !== "fire") clearPops();
     drawTicks();
-    if (s === "fire"){ drawFireSim(p.mergid, 0, fsim.dur_h, {fit:true, reuse:false});
-      renderPops(fsim.dur_h, -1); }
-    else { clearPops(); drawPix(p.pcb_id, -24, 24, {fit:true, reuse:false}); }
+    // Show the whole extent first, so you can see what you are about to animate;
+    // pressing play rewinds to the start.
+    showGrid(s === "fire" ? fsim.g : byPcbPix[p.pcb_id],
+             t0Of(), t0Of() + spanOf(), spanOf(), t0Of(), {fit:true});
+    animU = 1; render();
   };
   $("#scA").onclick = () => setScope("win");
   $("#scB").onclick = () => setScope("fire");
 
-  $("#pmA").onclick = () => { PANEL_MODE="static"; stopAnim(); playBtn.innerHTML="&#9654; Play";
-    $("#pmA").classList.add("on"); $("#pmB").classList.remove("on"); clearPops();
+  $("#pmA").onclick = () => { PANEL_MODE="static"; pause(); clearPops();
+    $("#pmA").classList.add("on"); $("#pmB").classList.remove("on");
     $("#paneStatic").hidden=false; $("#paneAnim").hidden=true; applyStatic(); };
   $("#pmB").onclick = () => { PANEL_MODE="animate";
     $("#pmB").classList.add("on"); $("#pmA").classList.remove("on");
     $("#paneStatic").hidden=true; $("#paneAnim").hidden=false;
-    $("#tierkey").hidden = animScope!=="fire"; $("#slwRow").hidden = animStyle!=="sliding";
-    drawTicks();
-    if (animScope==="fire" && fsim){ drawFireSim(p.mergid, 0, fsim.dur_h, {fit:true, reuse:false});
-      renderPops(fsim.dur_h, -1); }
-    else drawPix(p.pcb_id, -24, 24, {fit:true, reuse:false}); };
+    $("#slwRow").hidden = animStyle!=="sliding";
+    setScope(animScope); };
 
   (PANEL_MODE==="animate" ? $("#pmB") : $("#pmA")).onclick();
 }
@@ -920,9 +1041,12 @@ PANES.forEach((k,i)=>{ map.createPane(k); map.getPane(k).style.zIndex = 405+i*10
 map.getPane("lc").style.pointerEvents = "none";                      // land cover: backdrop only, never eats a click
 map.createPane("ignlbl"); map.getPane("ignlbl").style.zIndex = 452;   // stars: above bands, below pyroCb
 map.createPane("lbl"); map.getPane("lbl").style.zIndex = 480;
-map.createPane("hl");  map.getPane("hl").style.zIndex = 490;          // active-burn highlight: on top of all
+map.createPane("hl");  map.getPane("hl").style.zIndex = 490;          // fire-activity canvas: on top of all
 map.getPane("hl").style.pointerEvents = "none";                      // ...but transparent to clicks, so a new pyroCb stays selectable
-R.hl = L.canvas({pane:"hl"});
+map.createPane("pop"); map.getPane("pop").style.zIndex = 495;        // "a pyroCb popped" markers, above the burn canvas
+map.getPane("pop").style.pointerEvents = "none";
+R.pop = L.canvas({pane:"pop"});
+burn = new BurnLayer({pane:"hl", padding:0.15}).addTo(map);
 
 const ALL = ["lc","per","bnd","ign","pcb","pcbC","orp"];
 const cache = {}, byFire = {};
@@ -1035,9 +1159,20 @@ function buildLayers(y, gj){
   const bndLayerStyle = l => l.setStyle(bndOpts.style(l.feature));
 
   return {
-    lc:   L.geoJSON(gj.lc, {pane:"lc", renderer:R.lc, interactive:false,
-            style: ft => ({stroke:false, fill:true,
-                           fillColor:LC_COL[ft.properties.cls]||"#999", fillOpacity:1})}),
+    // Land cover: a paletted PNG per fire (native-ish, GPU-composited) over a coarse
+    // 10 km polygon backdrop for everything beyond them.
+    lc:   (() => {
+            const grp = L.layerGroup();
+            L.geoJSON(gj.lc, {pane:"lc", renderer:R.lc, interactive:false,
+              style: ft => ({stroke:false, fill:true,
+                             fillColor:LC_COL[ft.properties.cls]||"#999", fillOpacity:1})}).addTo(grp);
+            for (const k in (gj.lcpng||{})){
+              const o = gj.lcpng[k];
+              L.imageOverlay(o.d, o.b, {pane:"lc", opacity:1, interactive:false,
+                className:"lcimg"}).addTo(grp);
+            }
+            return grp;
+          })(),
     per:  L.geoJSON(gj.per, perOpts),
     bnd:  L.geoJSON(gj.bnd, bndOpts),
     ign:  L.geoJSON(gj.ign, ignOpts),
@@ -1070,9 +1205,11 @@ async function ensureYear(y){
   const d = DATA[y];
   const [per,ign,pcb,bnd,pix,lc,sim] = await Promise.all(
     [d.per,d.ign,d.pcb,d.bnd,d.pix,d.lc,d.sim].map(unpack));
-  Object.assign(byPcbPix, pix);          // pcb_id -> per-detection arrays
-  Object.assign(byFireSim, sim);         // mergid -> whole-fire series
-  cache[y] = buildLayers(y,{per,ign,pcb,bnd,lc});
+  Object.assign(byPcbPix, pix);          // pcb_id -> +/-24 h cell grid
+  Object.assign(byFireSim, sim);         // mergid  -> whole-fire series
+  // lcpng is already-base64 PNG, so it is embedded raw - gzipping it would only add
+  // a second base64 pass over incompressible data.
+  cache[y] = buildLayers(y,{per,ign,pcb,bnd,lc,lcpng:d.lcpng||{}});
   return cache[y];
 }
 
@@ -1220,8 +1357,8 @@ function drawLegend(){
         + [1,2,5,6,8,10,11,12,13,14,15,16,18].map(c =>
             `<div class="row"><i class="sq" style="background:${LC_COL[c]}"></i>${LC_LAB[c]}</div>`
           ).join("")
-        + `<div class="sub" style="margin-top:4px">&asymp;90 m inside small perimeters, 1 km over fires + 5 km,`
-        + ` 10 km beyond. Exact 30 m composition is in the pyroCb info panel.</div>`
+        + `<div class="sub" style="margin-top:4px">&asymp;120 m raster over each fire + 5 km,`
+        + ` 10 km polygons beyond. Exact 30 m composition is in the pyroCb info panel.</div>`
         + `</div></details>` : "");
   if (MODE==="year"){
     legendDiv.innerHTML = `<h4>Boreal fires &amp; pyroCb</h4>${common}

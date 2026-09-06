@@ -99,16 +99,13 @@ LC_YEAR_SPLIT = 2018
 LC_CELL_M     = 1000.0
 LC_BUFFER_M   = 5000.0
 LC_SIMPLIFY_M = 2000.0
-# Fine tier INSIDE the fire perimeter only (no collar), and ONLY for fires whose
-# bounding box is under LC_FINE_MAX_KM2 - large fires keep just the 1 km tier.
-# True 30 m polygons over every pyroCb perimeter come to ~14 MB compressed for 2023
-# alone (57 MB whole file); even 90/300 m over all of them is ~7 MB. So the map only
-# gets a crisp 90 m fill where it is cheap. The 30 m composition that matters for the
-# science is still exact - active_fractions() reads the raster at native 30 m for the
-# attribute table and the info panel.
-LC_FINE_CELL_M     = 90.0
-LC_FINE_SIMPLIFY_M = 150.0
-LC_FINE_MAX_KM2    = 150.0
+# Near the fires land cover is a paletted PNG overlay per fire (pyrocb/lcraster.py),
+# not polygons: ~120 m everywhere for ~1.9 MB over 2023's 69 fires (the 1 km polygon
+# tier it replaces was 1.1 MB), and one GPU-composited <img> per fire instead of
+# thousands of canvas paths. LC_PNG_MIN_M is the ground-resolution floor, LC_PNG_CAP_PX
+# the per-side pixel cap that keeps a continent-sized fire from producing a huge image.
+LC_PNG_MIN_M  = 120.0
+LC_PNG_CAP_PX = 640
 # Coarse background land cover: away from the fires the map still shows land cover
 # rather than OpenStreetMap, but decimated hard so the browser copes. Drawn under
 # the 1 km fire layer, over the convex hull of the year's pyroCb fires + this collar.
@@ -122,14 +119,16 @@ LC_ACTIVE_WINDOW = (6, 0)
 # Fall back to the first this-many hours of detected burning that IS available.
 LC_BLOWUP_SPAN_H = 6.0
 
-# ---------------------------------------------------------------- whole-fire animation
-# The map's "animate the entire event" mode. Every NFP detection of a pyroCb fire,
-# first detection to last, decimated by proximity to a pyroCb onset: near an onset
-# stays near-native, the quiet spans between onsets go coarse. See pyrocb/firesim.py.
-FIRESIM_PCB_NEAR_H = (24.0, 72.0)          # tier A / B / C time-to-onset boundaries
-FIRESIM_GRID_M     = (0.0, 1000.0, 3000.0) # spatial dedup cell per tier (0 = native)
-FIRESIM_BIN_H      = (0.0, 6.0, 24.0)      # time-bin per tier
-FIRESIM_MAX_PTS    = 5000                  # per fire; widen B/C grids until it fits
+# ---------------------------------------------------------------- fire-activity grid
+# Both animation layers (the +/-24 h window and the whole-fire event) ship as a
+# delta-coded, time-sorted grid of burned cells at ONE ground resolution - see
+# pyrocb/burngrid.py. 375 m is a single VIIRS pixel, i.e. native.
+#
+# This replaced a tiered decimation that inflated each kept detection to its dedup
+# cell, so the quiet spans between pyroCb onsets were drawn as 3 km blocks - blocks
+# that swallowed whole perimeters on small fires. Measured on 2023: the grid is
+# 0.64 MB base64 at 375 m against 1.7 MB for the old 1-3 km version.
+BURN_CELL_M = 375.0
 
 # Map scope. True -> the map carries only fires credited with a pyroCb (and their
 # ignitions), which is the analysis population; False -> every tracked fire, which is

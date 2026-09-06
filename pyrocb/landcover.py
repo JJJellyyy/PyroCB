@@ -81,13 +81,13 @@ def _polygonise(r, clip_geom, cell, simp):
 
 
 def landcover_layer(year: int, geoms_3979) -> gpd.GeoDataFrame:
-    """Dissolved [cls, res, geometry] land-cover polygons (WGS84).
+    """Dissolved [cls, res, geometry] land-cover polygons (WGS84) - the COARSE backdrop
+    only, at `LC_BG_CELL_M` (10 km) over a wide collar around each fire.
 
-    Two resolutions in one layer, distinguished by `res` (metres):
-      * `LC_CELL_M` (1 km) over each fire perimeter grown by `LC_BUFFER_M`;
-      * `LC_BG_CELL_M` (10 km) over the convex hull of all the fires + `LC_BG_BUFFER_M`,
-        with the fine footprints punched out, so the map shows land cover instead of
-        OpenStreetMap everywhere near the fires without shipping a national raster.
+    Everything closer in is a paletted PNG overlay now (`pyrocb/lcraster.py`): finer,
+    smaller, GPU-composited, and it skips the slow `features.shapes` + dissolve that
+    used to dominate the build. The collar stays vector because at 10 km it is a
+    handful of cheap polygons and it has to tile a very large area.
     """
     geoms_3979 = [_poly_only(shapely.make_valid(g)) for g in geoms_3979
                   if g is not None and not g.is_empty]
@@ -96,34 +96,16 @@ def landcover_layer(year: int, geoms_3979) -> gpd.GeoDataFrame:
         return gpd.GeoDataFrame({"cls": [], "res": []},
                                 geometry=gpd.GeoSeries([], crs=C.WGS84))
 
-    fine_bg = [g.buffer(C.LC_BUFFER_M) for g in geoms_3979]
-    fine_union = shapely.union_all(fine_bg)
-    nat, mid, coarse = [], [], []
+    # The PNG overlays cover perimeter + LC_BUFFER_M, so punch that out of the collar.
+    png_union = shapely.union_all([g.buffer(C.LC_BUFFER_M) for g in geoms_3979])
+    coarse = []
     with rasterio.open(_tif(year)) as r:
         rbounds = shapely.box(*r.bounds)
-
-        # Fine 90 m tier INSIDE the perimeter (no collar), small fires only - large
-        # perimeters at this resolution blow up the payload (see config). No
-        # .intersection(g): _polygonise already masks to g at raster-cell precision,
-        # and a per-shape clip against a big, self-touching perimeter throws in GEOS.
+        # A wide collar around EACH fire - never a hull over all of them, since fires
+        # span the dateline and EPSG:3979 is Canada-only, so a global hull would be a
+        # garbage megapolygon and a huge read.
         for g in geoms_3979:
-            mnx, mny, mxx, mxy = g.bounds
-            if (mxx - mnx) * (mxy - mny) / 1e6 > C.LC_FINE_MAX_KM2:
-                continue
-            nat += [(v, poly, int(C.LC_FINE_CELL_M)) for v, poly in
-                    _polygonise(r, g, C.LC_FINE_CELL_M, C.LC_FINE_SIMPLIFY_M)]
-
-        # 1 km over the perimeter + 5 km collar.
-        for bg in fine_bg:
-            mid += [(v, g, C.LC_CELL_M) for v, g in
-                    _polygonise(r, bg, C.LC_CELL_M, C.LC_SIMPLIFY_M)]
-
-        # Coarse backdrop: a wide collar around EACH fire (never a hull over all of
-        # them - fires span the dateline, and EPSG:3979 is Canada-only, so a global
-        # hull would be a garbage megapolygon). Read per fire, clipped to the raster
-        # and with the 1 km footprints punched out.
-        for g in geoms_3979:
-            collar = g.buffer(C.LC_BG_BUFFER_M).difference(fine_union).intersection(rbounds)
+            collar = g.buffer(C.LC_BG_BUFFER_M).difference(png_union).intersection(rbounds)
             if collar.is_empty:
                 continue
             for v, poly in _polygonise(r, collar, C.LC_BG_CELL_M, C.LC_BG_SIMPLIFY_M):
@@ -134,12 +116,10 @@ def landcover_layer(year: int, geoms_3979) -> gpd.GeoDataFrame:
                 if not p.is_empty:
                     coarse.append((v, p, C.LC_BG_CELL_M))
 
-    # Group by (res, cls) and union with a grid snap - far more robust to the
-    # near-degenerate slivers a 150 m simplify of 30 m shapes can leave than
-    # GeoDataFrame.dissolve, which was throwing "unable to assign free hole to a shell".
-    parts = coarse + mid + nat   # painter's order: coarse under, native on top
+    # Group by (res, cls) and union with a grid snap - more robust than
+    # GeoDataFrame.dissolve, which threw "unable to assign free hole to a shell".
     groups: dict = {}
-    for v, g, res in parts:
+    for v, g, res in coarse:
         if g is None or g.is_empty:
             continue
         g = _poly_only(shapely.make_valid(g))

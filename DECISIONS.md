@@ -248,7 +248,51 @@ exists everywhere; `active_fractions` does a windowed native read + `geometry_ma
 fuel that drove the pyroCb. **Rejected:** reusing the 1 km layer - a ~10 km² polygon is
 only ~10 cells at 1 km, far too coarse for a composition.
 
+### D-40 — Fire activity ships as a gridded burn-time array, not as detections
+Snap NFP detections to a 375 m grid (one VIIRS pixel) built in **EPSG:3857**, keep the time
+each cell first burned (whole-fire) or unique (cell, observation) pairs (±24 h window), sort
+by time, delta-encode. Measured on 2023: 393 k cells at 375 m = **0.64 MB** base64, against
+1.7 MB for 276 k points at 1–3 km. Finer *and* smaller, because a cell index delta is a tiny
+integer and gzip eats runs of those, while a lat/lon box is six floats.
+Two consequences that the rest of the design leans on:
+1. **Mercator, not lat/lon.** Web Mercator is the display projection, so a cell index becomes
+   a canvas pixel with one multiply-add. Storing lat/lon would force a projection per cell
+   per frame.
+2. **Time-sorted means every view is a contiguous index range** — cumulative to *t*, a
+   sliding window, a static −pre..+post window. That is what makes incremental drawing
+   possible (D-41).
+**Rejected:** binary typed arrays instead of JSON — measured *larger* after gzip (0.75 MB vs
+0.64 MB), because gzip compresses runs of small decimal integers better than raw int32.
+**Rejected:** the old proximity-tiered decimation — it inflated each surviving detection to
+its dedup cell, so quiet spans drew as 3 km blocks that covered whole small perimeters.
+
+### D-41 — The animation draws to a canvas directly, and only draws what is new
+`BurnLayer` subclasses `L.Renderer` (not `L.Layer`) so Leaflet's container positioning and
+zoom-animation transforms come for free — the same machinery `L.Canvas` uses — and, like
+`L.Canvas`, the context is translated by `-bounds.min` so we draw in layer coordinates.
+Advancing the cursor extends the visible index range on the right, so the new slice is
+painted *on top of what is already there*; only a rewind, a style change or a map move
+forces a full repaint.
+**Rejected:** rebuilding a GeoJSON FeatureCollection per frame (what v0.9–v0.13 did) — it
+allocated a Leaflet `Path` per box sixty times a second.
+**Rejected:** plain `L.Layer` with hand-rolled positioning — got the pan right but needed
+Leaflet's `_updateTransform` bookkeeping to survive zoom animation.
+
+### D-42 — Land cover near the fires is a paletted PNG overlay, not polygons
+Supersedes D-39. One 8-bit paletted PNG per fire, warped to EPSG:3857 (so `L.imageOverlay`'s
+linear placement is exact rather than stretched), ~120 m ground resolution, with a 3×3
+majority filter before encoding. 2023: **~1.9 MB for all 69 fires at ~120 m**, against 1.1 MB
+for 1 km polygons — ~8× finer for under 2× the bytes, one GPU-composited `<img>` per fire
+instead of thousands of canvas paths, and it deletes the `features.shapes` + dissolve +
+simplify path that dominated build time and threw topology exceptions.
+**Measured on the way:** RGBA PNG is 36 MB (palette compression destroyed); paletted at a
+512 px cap is 3.4 MB; the majority filter alone takes ~35 % off. The 10 km polygon backdrop
+beyond the fires stays vector — it is a handful of cheap shapes over a very large area.
+**Still true:** `active_fractions` reads the raster at native **30 m** for the attribute
+table and the info panel. The raster tier is presentation; the science number never changed.
+
 ### D-39 — Land cover map layer: finer inside SMALL perimeters, but not true 30 m vector
+*(superseded by D-42 — kept for the measurements)*
 Three tiers, painter-ordered coarse→fine: 10 km collar, 1 km over perimeter + 5 km, and an
 inside-perimeter tier at **≈90 m for fires whose bbox is under `LC_FINE_MAX_KM2` (150 km²)**
 only. Larger fires keep the 1 km tier. Sub-km features are simplified again in the payload
