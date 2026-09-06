@@ -7,6 +7,23 @@ Rationale for each choice lives in [DECISIONS.md](DECISIONS.md); data discoverie
 
 ---
 
+## v0.10 — 2026-09-06 — land-cover context layer
+
+### Added
+* **Land cover** (`pyrocb/landcover.py`) — the 30 m *Land Cover of Canada* rasters
+  (EPSG:3979; 2015 collection for 2013–2017, 2020 for 2018–2023) read windowed to each
+  pyroCb fire's perimeter **+ 5 km**, majority-resampled to **1 km**, masked, polygonised
+  by class and dissolved. New toggleable map layer under everything else, coloured by the
+  15-class boreal palette, with a legend. Payload cost after 11 m coordinate snapping:
+  ~0.1 MB/year, 0.6 MB for 2023 — the whole map went 9.9 → 11.3 MB.
+* `LC_TIF_2015` / `LC_TIF_2020` / `LC_CELL_M` / `LC_BUFFER_M` / `LC_SIMPLIFY_M` in config.
+
+### Note
+This is the *context* layer only. Per-active-burn-polygon land-cover fractions for the
+attribute table are the next step.
+
+---
+
 ## v0.9 — 2026-09-06 — active burn localised, window slider + animation
 
 ### Fixed

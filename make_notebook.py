@@ -65,7 +65,7 @@ import pandas as pd
 
 import pyrocb
 from pyrocb import (config as C, io, timebins as T, matching, bands, active,
-                    variables, pipeline)
+                    variables, pipeline, landcover)
 
 pd.set_option("display.max_columns", 60)
 pd.set_option("display.width", 200)
@@ -426,9 +426,19 @@ for y in YEARS:
         }
     b64["pix"], _, gpx = pack(pixobj)
 
+    # Land cover over each pyroCb fire + 5 km, decimated to 1 km, dissolved by class.
+    lc = pipeline.landcover_cached(y, linked) if linked else None
+    if lc is not None and len(lc):
+        lc = lc.copy()
+        lc["geometry"] = shapely.set_precision(lc.geometry.values, 1e-4)
+        lc = lc[~lc.geometry.is_empty & lc.geometry.notna()]
+        b64["lc"], _, glc = pack(json.loads(lc.to_json(drop_id=True)))
+    else:
+        b64["lc"], _, glc = pack({"type": "FeatureCollection", "features": []})
+
     payloads[y] = b64
     print(f"  {y}: {len(per_out):>6} perims  {len(ign_out):>6} ignitions  {len(pg):>3} pyroCb"
-          f"  {0 if bg is None else len(bg):>3} bands  {len(px):>6} px"
+          f"  {0 if bg is None else len(bg):>3} bands  {len(px):>6} px  {glc/1e6:4.1f}MB lc"
           f"   packed {(gp+gi+gpx)/1e6:5.2f} MB", flush=True)
 
 # Fit the DOY window to the whole dataset, weighted by BURNED AREA. Weighting matters:
@@ -763,19 +773,28 @@ const map = L.map("map").setView([62,-105], 3);
 L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
   {maxZoom:19, attribution:"&copy; OpenStreetMap"}).addTo(map);
 
-const PANES = ["per","act","bnd","ign","pcb","orp"];
+const PANES = ["lc","per","act","bnd","ign","pcb","orp"];
 const R = {};
-PANES.forEach((k,i)=>{ map.createPane(k); map.getPane(k).style.zIndex = 410+i*10;
+PANES.forEach((k,i)=>{ map.createPane(k); map.getPane(k).style.zIndex = 405+i*10;
                        R[k] = L.canvas({pane:k}); });
-map.createPane("ignlbl"); map.getPane("ignlbl").style.zIndex = 445;   // stars: above bands, below pyroCb
-map.createPane("lbl"); map.getPane("lbl").style.zIndex = 470;
-map.createPane("hl");  map.getPane("hl").style.zIndex = 480;          // active-burn highlight: on top of all
+map.createPane("ignlbl"); map.getPane("ignlbl").style.zIndex = 455;   // stars: above bands, below pyroCb
+map.createPane("lbl"); map.getPane("lbl").style.zIndex = 480;
+map.createPane("hl");  map.getPane("hl").style.zIndex = 490;          // active-burn highlight: on top of all
 R.hl = L.canvas({pane:"hl"});
 
-const ALL = ["per","act","bnd","ign","pcb","pcbC","orp"];
+const ALL = ["lc","per","act","bnd","ign","pcb","pcbC","orp"];
 const cache = {}, byFire = {};
 const activeYears = new Set([YEARS[YEARS.length-1]]);
-const showKind = {per:true, act:true, bnd:true, ign:true, pcb:true, orp:true};
+const showKind = {lc:false, per:true, act:true, bnd:true, ign:true, pcb:true, orp:true};
+
+// Land Cover of Canada palette (classes present in the boreal zone).
+const LC_COL = {1:"#003d00",2:"#949c70",5:"#148c3d",6:"#5c752b",8:"#b38a2d",10:"#e1cf8a",
+  11:"#9c7554",12:"#bad48f",13:"#408a70",14:"#6ba38a",15:"#e6ae66",16:"#a8abae",
+  17:"#dc2126",18:"#4c70a3",19:"#fffaff"};
+const LC_LAB = {1:"Needleleaf forest",2:"Taiga needleleaf",5:"Broadleaf deciduous",
+  6:"Mixed forest",8:"Shrubland",10:"Grassland",11:"Polar shrub-lichen-moss",
+  12:"Polar grass-lichen-moss",13:"Polar barren-lichen-moss",14:"Wetland",15:"Cropland",
+  16:"Barren land",17:"Urban",18:"Water",19:"Snow & ice"};
 let hideOrphans=false;
 
 function buildLayers(y, gj){
@@ -874,6 +893,12 @@ function buildLayers(y, gj){
   };
 
   return {
+    lc:   L.geoJSON(gj.lc, {pane:"lc", renderer:R.lc,
+            style: ft => ({stroke:false, fillColor:LC_COL[ft.properties.cls]||"#999",
+                           fillOpacity:0.55}),
+            onEachFeature:(ft,l)=>l.bindPopup(
+              `<b>${esc(LC_LAB[ft.properties.cls]||("class "+ft.properties.cls))}</b>`
+              +`<br>land cover ${y<2018?2015:2020}, 1 km`)}),
     per:  L.geoJSON(gj.per, perOpts),
     bnd:  L.geoJSON(gj.bnd, bndOpts),
     act:  L.geoJSON(gj.act, actOpts),
@@ -893,6 +918,7 @@ function buildLayers(y, gj){
 
 function wanted(){
   const w = new Set();
+  if (showKind.lc) w.add("lc");
   if (showKind.per) w.add("per");
   if (showKind.bnd) w.add("bnd");
   if (showKind.act) w.add("act");
@@ -905,10 +931,10 @@ function wanted(){
 async function ensureYear(y){
   if (cache[y]) return cache[y];
   const d = DATA[y];
-  const [per,ign,pcb,bnd,act,pix] = await Promise.all(
-    [d.per,d.ign,d.pcb,d.bnd,d.act,d.pix].map(unpack));
+  const [per,ign,pcb,bnd,act,pix,lc] = await Promise.all(
+    [d.per,d.ign,d.pcb,d.bnd,d.act,d.pix,d.lc].map(unpack));
   Object.assign(byPcbPix, pix);          // pcb_id -> per-detection arrays
-  cache[y] = buildLayers(y,{per,ign,pcb,bnd,act});
+  cache[y] = buildLayers(y,{per,ign,pcb,bnd,act,lc});
   return cache[y];
 }
 
@@ -978,6 +1004,7 @@ panel.onAdd = () => {
       <div class="seg"><button id="mYear" class="on">Year</button><button id="mDoy">Day of year</button></div>
       <div class="sub">Pick one year to watch a season progress.</div></div>
     <div class="layers">
+      <label><input type="checkbox" data-kind="lc"> Land cover (1 km, fire + 5 km)</label>
       <label><input type="checkbox" data-kind="per" checked> Fire perimeters</label>
       <label><input type="checkbox" data-kind="bnd" checked> Growth bands (split at pyroCb)</label>
       <label><input type="checkbox" data-kind="act" checked> Active burn area at onset (&plusmn;12 h)</label>
@@ -998,7 +1025,7 @@ panel.onAdd = () => {
   d.querySelector("#allY").onclick  = ()=>{YEARS.forEach(y=>activeYears.add(y)); refresh();};
   d.querySelector("#noneY").onclick = ()=>{activeYears.clear(); refresh();};
   d.querySelectorAll("input[data-kind]").forEach(i=>i.onchange=()=>{
-    showKind[i.dataset.kind]=i.checked; refresh();});
+    showKind[i.dataset.kind]=i.checked; refresh(); if (i.dataset.kind==="lc") drawLegend();});
   d.querySelector("#hideOrp").onchange = e=>{hideOrphans=e.target.checked; refresh();};
   const my=d.querySelector("#mYear"), mdy=d.querySelector("#mDoy");
   my.onclick  = ()=>{MODE="year"; my.classList.add("on"); mdy.classList.remove("on"); recolour();};
@@ -1048,7 +1075,11 @@ function drawLegend(){
     <div class="row"><i style="border:2px solid #e11;background:none"></i>unmatched pyroCb</div>
     <div class="row"><i class="sq" style="border:2px solid #00e5ff;background:rgba(0,229,255,.18)"></i>active burn at onset (&plusmn;12 h)</div>
     <div class="sub" style="margin-top:5px">Growth bands: pale core = burned before the first
-    pyroCb, darker = later runs; the faintest outer band is after the last pyroCb.</div>`;
+    pyroCb, darker = later runs; the faintest outer band is after the last pyroCb.</div>`
+    + (showKind.lc ? `<div class="sub" style="margin-top:6px">Land cover</div>`
+        + [1,2,5,6,8,10,11,12,13,14,15,16,18].map(c =>
+            `<div class="row"><i class="sq" style="background:${LC_COL[c]}"></i>${LC_LAB[c]}</div>`
+          ).join("") : "");
   if (MODE==="year"){
     legendDiv.innerHTML = `<h4>Boreal fires &amp; pyroCb</h4>${common}
       <div class="sub" style="margin:6px 0 3px">Colour = year</div>

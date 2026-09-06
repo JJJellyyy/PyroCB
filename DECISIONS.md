@@ -215,6 +215,18 @@ uses a 100 m rasterised area (sub-percent error).
 pixels, cumulative or sliding-window, 3/5/10 s loop. No frames, tiles or video in the payload;
 it reuses one Leaflet layer via `clearLayers()`/`addData()` so it stays smooth.
 
+### D-32 — Land cover: read in the raster's own CRS, decimate on read, polygonise
+The *Land Cover of Canada* rasters are EPSG:3979, 190001 × 160001, uint8. We never
+reproject the raster - the fire perimeters go to 3979 instead - and we never read it at
+full 30 m: `rasterio` reads windowed to (perimeter + 5 km) with `out_shape` set for 1 km
+and `Resampling.mode`, so a 1 km cell is the commonest 30 m class under it. Then mask,
+`rasterio.features.shapes`, dissolve by class, simplify 2 km. 2015 collection for fire
+years < `LC_YEAR_SPLIT` (2018), 2020 collection after.
+**Rejected:** shipping a PNG image overlay per fire - crisper, but 255 `L.imageOverlay`
+elements, and the polygon layer is only ~1 MB for all years after coordinate snapping.
+**Rejected:** one union bbox per year - the 2023 pyroCb fires span BC to Quebec to Yukon,
+a 5300 × 7900 km box that is 99 % nodata; per-fire windows keep the reads tiny.
+
 ### D-20 — Analysis lives in a package, not in notebook string literals
 `make_notebook.py` emits the notebook; the logic sits in `pyrocb/` so it can be imported, tested,
 linted and profiled. The notebook narrates and calls it.

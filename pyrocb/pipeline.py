@@ -16,6 +16,7 @@ from . import active as A
 from . import bands as B
 from . import config as C
 from . import io
+from . import landcover as LC
 from . import matching as M
 from . import variables as V
 
@@ -97,6 +98,21 @@ def active_cached(year: int, events: pd.DataFrame):
               "attach": C.ACTIVE_ATTACH_CAP_KM}
     return C.cached("active", year, params, _inputs(year),
                     lambda: A.active_polygons(year, events), geo=True)
+
+
+def landcover_cached(year: int, mergids) -> "gpd.GeoDataFrame":
+    """Dissolved land-cover polygons around the year's pyroCb fires + 5 km."""
+    mergids = sorted(int(m) for m in mergids)
+    params = {"cell": C.LC_CELL_M, "buf": C.LC_BUFFER_M, "simp": C.LC_SIMPLIFY_M,
+              "split": C.LC_YEAR_SPLIT, "mergids": mergids}
+    tif = LC._tif(year)
+
+    def build():
+        per = io.read_final(year).to_crs(3979)
+        g = per[per["mergid"].isin(mergids)].geometry
+        return LC.landcover_layer(year, list(g))
+
+    return C.cached("landcover", year, params, [tif], build, geo=True)
 
 
 def run_year(year: int, verbose: bool = True):

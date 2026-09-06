@@ -87,6 +87,17 @@ ACTIVE_TABLE_WINDOWS = ((12, 12), (6, 6), (24, 24), (0, 24), (24, 0))
 ACTIVE_BRIDGE_M      = 1500.0
 ACTIVE_ATTACH_CAP_KM = 20.0
 
+# ---------------------------------------------------------------- land cover
+# 30 m Land Cover of Canada (EPSG:3979). 2015 collection for the earlier fire
+# years, 2020 for LC_YEAR_SPLIT onward. Decimated to LC_CELL_M for the map layer;
+# the perimeter is grown by LC_BUFFER_M so the fire's surroundings are included.
+LC_TIF_2015   = str(ROOT / "landcover-2015-classification.tif")
+LC_TIF_2020   = str(ROOT / "landcover-2020-classification.tif")
+LC_YEAR_SPLIT = 2018
+LC_CELL_M     = 1000.0
+LC_BUFFER_M   = 5000.0
+LC_SIMPLIFY_M = 2000.0
+
 # Map scope. True -> the map carries only fires credited with a pyroCb (and their
 # ignitions), which is the analysis population; False -> every tracked fire, which is
 # ~170k polygons and a 27 MB file.
