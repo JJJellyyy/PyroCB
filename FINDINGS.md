@@ -301,12 +301,24 @@ which is exactly why anything above ~5 km was already flagged provisional.
 
 ### Map-side geometry fidelity
 
-Separately, the *map* was simplifying perimeters at 0.003° (~330 m), which is about one
-VIIRS pixel and plainly visible when zoomed into a fire. FEDS perimeters are alpha
-shapes fitted over 375 m pixels, so the source itself has ~375 m granularity: simplifying
-an order of magnitude below that is visually lossless and anything finer just stores
-alpha-shape noise. Now 0.0003° (~33 m) with a 1e-6° (~0.11 m) coordinate snap, and the
-growth bands lost the ±60 m buffer-close that was rounding real concave detail off them.
+Separately, the *map* was simplifying perimeters at 0.003° (~330 m). Measured deviation
+from the unsimplified geometry over 2023's 69 pyroCb fires (Hausdorff, metres):
+
+| perimeter simplify | max dev | median dev | 2023 payload |
+|---|---|---|---|
+| 0.003° (~334 m) — shipped through v0.15 | **585 m** | 335 m | 0.55 MB |
+| 0.001° (~111 m) | 199 m | 124 m | 0.84 MB |
+| **0.0003° (~33 m) — v0.16** | **56 m** | 33 m | 1.55 MB |
+| 0.0001° (~11 m) | 14 m | 11 m | 2.50 MB |
+
+The old tolerance was displacing boundaries by up to **585 m — more than one full VIIRS
+pixel**, which is why it was visible when zoomed in. FEDS perimeters are alpha shapes
+fitted over 375 m pixels, so the source itself is granular at 375 m: ~33 m is an order of
+magnitude below that (bounded worst case 56 m, ~1/7 of a pixel) and anything finer just
+stores alpha-shape noise at 2–8× the bytes. The coordinate snap stays at 1e-5° (~1.1 m),
+already ~340× finer than a pixel; 1e-6° bought only invisible decimetres.
+
+Growth bands were fixed separately and far more dramatically — see **F14**.
 
 ---
 

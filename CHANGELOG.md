@@ -26,10 +26,12 @@ Rationale for each choice lives in [DECISIONS.md](DECISIONS.md); data discoverie
   map now also ships `fire_lat`/`fire_lon`: the centroid of each event's own 6 h-pre-onset
   active burn, which is located to **one 375 m VIIRS pixel**, and can plot events there
   instead. `loc_rounded` flags which events were snapped.
-* **Perimeter simplification 0.003° → 0.0003°** (~330 m → ~33 m) and the coordinate snap
-  1e-5° → 1e-6° (~1.1 m → ~0.11 m). FEDS perimeters are alpha shapes over 375 m pixels,
-  so ~33 m is an order of magnitude below the source's own granularity — visually lossless,
-  where 330 m was plainly visible zoomed in.
+* **Perimeter simplification 0.003° → 0.0003°** (~330 m → ~33 m). Measured: the old
+  tolerance displaced boundaries by up to **585 m — more than one full VIIRS pixel**
+  (median 335 m); the new one is bounded at **56 m** (median 33 m). FEDS perimeters are
+  alpha shapes over 375 m pixels, so ~33 m is an order of magnitude below the source's own
+  granularity. Coordinate snap stays 1e-5° (~1.1 m, already ~340× finer than a pixel);
+  1e-6° bought only invisible decimetres at a real cost in bytes.
 * **Growth bands: the ±60 m buffer-close removed** (simplify-only at 50 m). This turned
   out to be the *largest* positional error in the map, far bigger than the perimeter
   issue we set out to fix: bands are thin rings, and a `buffer(+r).buffer(-r)` close
