@@ -334,6 +334,21 @@ still cost 2.5–3.1 km of max error for no payload saving.
 **Rule going forward:** morphological open/close is valid only on the pixel-lattice
 layers, where fusing disjoint 375 m squares is the point.
 
+### D-46 — Report-uncertainty box is per-event, sized to that event's coordinate grid
+The atlas nominal precision is 0.1°, but 2013–2016 mix in some 0.01° coordinates. Gating
+the box on "exactly 0.1°-rounded" hid it for the finer ones (looked like a bug for 2014).
+Now every event ships `loc_prec` (0.1° or 0.01°) and the box is drawn at half that cell,
+so it always appears. Whole-number coordinates are treated as 0.1°, not 1° — they are
+almost certainly 0.1-grid values that landed on an integer, and a ~110 km box would lie.
+The box also obeys the same visibility as the marker (`pcbShown`): region filter, month
+cursor, hide-unmatched, layer toggle.
+
+### D-47 — The control panel is dropdowns; one summary tag per section
+The panel had grown past a laptop viewport (items clipped off the bottom). Every section
+is a `<details>` now, with a one-word state tag in the summary (`Regions … all`,
+`Colour by … day of year`) so the collapsed panel still tells you what is set. Years and
+Layers stay open; the rest collapse. The legend collapses too.
+
 ### D-45 — Animation mode is explicit, never inferred from the year selection
 Inferring "years vs months" from `activeYears.size` was the year-sweep bug: sweeping back
 to one year flipped the mode, which reset the animation and cleared the year set. The mode

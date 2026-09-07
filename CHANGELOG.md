@@ -7,7 +7,27 @@ Rationale for each choice lives in [DECISIONS.md](DECISIONS.md); data discoverie
 
 ---
 
-## v0.16 — 2026-09-07 — positional accuracy, country filter, band/perimeter styling
+## v0.17 — 2026-09-07 — panel dropdowns, jump-to-time, animation-style fix
+
+### Added
+* **Control panel is collapsible.** Every section (Animate / Regions / Layers / Colour by /
+  pyroCb position / pyroCb click) is a `<details>` dropdown with a one-word state tag in
+  the summary; only Years and Layers are open by default. The legend is collapsible too.
+* **Jump-to-time** in the whole-fire animation: type `3d 6h`, `30h`, or a UTC date-time
+  and the scrubber jumps there.
+* **Clicking a numbered pyroCb tick** in the whole-fire timeline now also **pans the map to
+  that event** — centre only, zoom unchanged.
+
+### Fixed
+* **Report-uncertainty box missing for 2013–2016 events.** Those years mix 0.1° and 0.01°
+  coordinates; the box was gated on "is 0.1°-rounded" so the finer ones drew nothing.
+  Now every event gets a box sized to *its own* grid (`loc_prec`: 0.1° / 0.01° / 1°).
+* **Uncertainty box ignored "hide unmatched".** It now obeys the same visibility as the
+  markers — region filter, month cursor, hide-unmatched, layer checkbox (`pcbShown`).
+* **Whole-fire + Cumulative sometimes stuck rendering the sliding window.** `animStyle`
+  persists across panel opens, but the fresh panel always drew "Cumulative" as selected —
+  so a mismatch until you re-clicked it. The style buttons now sync to the live value on
+  open.
 
 ### Added
 * **Country filter.** Toggle Canada / Northern Asia / Alaska. Region is carried on every

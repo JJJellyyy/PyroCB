@@ -373,8 +373,20 @@ for y in YEARS:
             cmap = dict(zip(cen["pcb_id"], zip(c4326.y.round(5), c4326.x.round(5))))
             pg["fire_lat"] = pg["pcb_id"].map(lambda k: (cmap.get(k) or (None, None))[0])
             pg["fire_lon"] = pg["pcb_id"].map(lambda k: (cmap.get(k) or (None, None))[1])
-    _r = lambda v: bool(abs(v * 10 - round(v * 10)) < 1e-9) if pd.notna(v) else False
-    pg["loc_rounded"] = [(_r(a) and _r(b)) for a, b in zip(p["lat"], p["lon"])]
+    # Coordinate precision per event, as the grid cell in degrees. The atlas nominal
+    # precision is 0.1 deg; a few 2013-2016 events carry a second decimal (0.01 deg).
+    # Whole-number coordinates are treated as 0.1 deg, not 1 deg - they are almost
+    # certainly 0.1-grid values that happened to land on an integer, and a 1 deg box
+    # (~110 km) would badly overstate it. The map draws the box at half this cell, so
+    # it appears for EVERY event, sized honestly.
+    def _prec(v):
+        # the COARSEST 10^-k grid the value lies on: a 0.1 value is on the 0.01 grid
+        # too, so 0.1 must be tested first.
+        if pd.isna(v) or abs(v * 10 - round(v * 10)) < 1e-9:
+            return 0.1
+        return 0.01
+    pg["loc_prec"] = [round(max(_prec(a), _prec(b)), 4) for a, b in zip(p["lat"], p["lon"])]
+    pg["loc_rounded"] = [pr >= 0.1 for pr in pg["loc_prec"]]
 
     pg = pg[[c for c in ("pcb_id", "datetime", "doy", "fire_name", "region", "status",
                          "max_inject_alt", "trop_relative_alt", "pcb_min_bt", "mergid",
@@ -387,7 +399,7 @@ for y in YEARS:
                          "active_detach_km_pre12_post12", "active_is_blowup", "agrid",
                          "lc_top1_cls", "lc_top1_frac", "lc_top2_cls", "lc_top2_frac",
                          "lc_top3_cls", "lc_top3_frac", "lc_n_px",
-                         "fire_lat", "fire_lon", "loc_rounded",
+                         "fire_lat", "fire_lon", "loc_rounded", "loc_prec",
                          "geometry")
                 if c in pg.columns]]
 
@@ -575,6 +587,18 @@ HTML = """<!DOCTYPE html>
                padding:3px 0;font:11px system-ui;cursor:pointer}
   .layers{border-top:1px solid #e3e3e3;margin-top:8px;padding-top:7px}
   .layers label{display:flex;align-items:center;gap:6px;margin:3px 0;cursor:pointer}
+  /* collapsible panel sections - keeps the control panel short */
+  details.sec{border-top:1px solid #e3e3e3;margin-top:6px;padding-top:5px}
+  details.sec>summary{cursor:pointer;font-weight:600;font-size:11px;list-style:none;
+     user-select:none;padding:1px 0;display:flex;align-items:center;gap:5px}
+  details.sec>summary::-webkit-details-marker{display:none}
+  details.sec>summary::before{content:"\\25B8";color:#999;font-size:9px}
+  details.sec[open]>summary::before{content:"\\25BE"}
+  details.sec>summary .tag{margin-left:auto;color:#888;font-weight:400;font-size:10px}
+  details.sec>div{padding:4px 0 2px}
+  #jumpTo,#jumpRow input{font:11px system-ui;padding:2px 4px;border:1px solid #bbb;border-radius:4px}
+  #jumpRow button{font:11px system-ui;border:1px solid #bbb;background:#f7f7f7;border-radius:4px;
+     padding:2px 7px;cursor:pointer;margin-left:4px}
   .seg{display:flex;gap:0;margin:4px 0 2px}
   .seg button{flex:1;border:1px solid #bbb;background:#f7f7f7;padding:3px 0;
               font:11px system-ui;cursor:pointer}
@@ -1058,6 +1082,8 @@ function openInfoPanel(p){
       +`<div id="scrubwrap"><div id="ticks"></div>`
         +`<input type="range" id="scrub" min="0" max="1000" step="1" value="0"`
         +` title="drag to scrub through the event"></div>`
+      +`<label id="jumpRow" hidden>jump to <input type="text" id="jumpTo" placeholder="e.g. 3d 6h  or  2023-06-04 22:00"`
+        +` style="width:150px"><button id="jumpGo">go</button></label>`
       +`<label>loop <span class="seg" id="loopSeg">`
         + [3,5,10,15,20].map(s=>`<button data-s="${s}">${s}s</button>`).join("") + `</span>`
         +`<input type="number" id="loopCustom" min="1" max="120" step="1" placeholder="s"`
@@ -1169,7 +1195,10 @@ function openInfoPanel(p){
       if (it.row){ b.classList.add("staggered");
         b.style.setProperty("--stem", ((maxRow - it.row) * 13 + 13) + "px"); }
       b.onclick = ev => { ev.preventDefault(); ev.stopPropagation();
-        pause(); animU = Math.min(1, Math.max(0, it.h / sp)); prevCur = null; render(); };
+        pause(); animU = Math.min(1, Math.max(0, it.h / sp)); prevCur = null; render();
+        const ll = fsim.pcb_ll && fsim.pcb_ll[it.i];
+        if (ll) map.panTo(ll, {animate:true});   // centre on the pyroCb, keep the zoom
+      };
       tr.appendChild(b);
     });
     tr.style.height = (14 + maxRow * 13) + "px";
@@ -1250,8 +1279,36 @@ function openInfoPanel(p){
     if (v >= 1 && v <= 120){ loopSec = v; markLoop(-1); }   // -1 clears every preset
   };
   radio($("#slwSeg"), "h", slideW, v => { slideW = v; render(); });
-  pair("#asA","#asB", v => { animStyle = v; $("#slwRow").hidden = v !== "sliding"; render(); },
-       "cumulative", "sliding");
+  const setStyle = v => {
+    animStyle = v;
+    $("#asA").classList.toggle("on", v === "cumulative");
+    $("#asB").classList.toggle("on", v === "sliding");
+    $("#slwRow").hidden = v !== "sliding";
+    render();
+  };
+  $("#asA").onclick = () => setStyle("cumulative");
+  $("#asB").onclick = () => setStyle("sliding");
+  setStyle(animStyle);                  // sync the buttons to the persisted value on open
+
+  // jump-to-time: accepts "3d 6h" / "30h" (from the fire's first detection) or a
+  // UTC date-time. Whole-fire scope only - the +/-24 h window scrubs trivially.
+  const doJump = () => {
+    const s = ($("#jumpTo").value || "").trim();
+    if (!s) return;
+    let h = null;
+    const md = s.match(/^\\s*(?:(\\d+(?:\\.\\d+)?)\\s*d)?\\s*(?:(\\d+(?:\\.\\d+)?)\\s*h)?\\s*$/i);
+    if (md && (md[1] || md[2])) h = (+md[1] || 0) * 24 + (+md[2] || 0);
+    else {
+      const ms = Date.parse(s.replace(" ", "T") + (/[zZ]|[+-]\\d\\d:?\\d\\d$/.test(s) ? "" : "Z"));
+      if (!isNaN(ms) && fsim) h = (ms - Date.parse(String(fsim.t0).replace(" ", "T") + "Z")) / 3600e3;
+    }
+    if (h == null) return;
+    pause();
+    animU = Math.min(1, Math.max(0, (h - t0Of()) / spanOf()));
+    prevCur = null; render();
+  };
+  $("#jumpGo").onclick = doJump;
+  $("#jumpTo").onkeydown = e => { if (e.key === "Enter"){ e.preventDefault(); doJump(); } };
 
   const AGE_KEY = `Colour = burn age: <span style="color:${AGE_STOPS[0]}">&#9632;</span> first`
     + ` &rarr; <span style="color:${AGE_STOPS[6]};text-shadow:0 0 1px #999">&#9632;</span> last.`;
@@ -1280,6 +1337,7 @@ function openInfoPanel(p){
     if (s === "fire" && !fsim) s = "win";
     animScope = s; prevCur = null; pause();
     $("#scA").classList.toggle("on", s === "win"); $("#scB").classList.toggle("on", s === "fire");
+    $("#jumpRow").hidden = s !== "fire";
     if (s !== "fire") clearPops();
     buildSnap(); drawTicks(); setColourKey();
     // Show the whole extent first, so you can see what you are about to animate;
@@ -1594,11 +1652,11 @@ function recolour(){
 const panel = L.control({position:"topright"});
 panel.onAdd = () => {
   const d = L.DomUtil.create("div","panel");
-  d.innerHTML = `<h4>Years</h4><div class="sub">Click a year to show / hide it.</div>
+  d.innerHTML = `<h4>Years</h4>
     <div class="chips">${YEARS.map(y=>`<button class="chip" data-year="${y}">${y}</button>`).join("")}</div>
     <div class="mini"><button id="allY">All</button><button id="noneY">None</button></div>
-    <details class="layers anim" id="animBox"><summary style="cursor:pointer;font-weight:600;font-size:11px">Animate</summary>
-      <div class="seg" id="gmodeSeg" style="margin-top:4px">
+    <details class="sec" id="animBox"><summary>Animate <span class="tag" id="animTag"></span></summary><div>
+      <div class="seg" id="gmodeSeg">
         <button data-g="off" class="on">Off</button><button data-g="year">Years</button>
         <button data-g="month">Months</button></div>
       <div id="gbody" hidden>
@@ -1609,14 +1667,11 @@ panel.onAdd = () => {
         <label style="font-size:10px;color:#666">step <span class="seg" id="gspdSeg">
           <button data-s="0.4">fast</button><button data-s="0.9" class="on">med</button>
           <button data-s="2">slow</button></span></label>
-      </div></details>
-    <div class="layers"><b style="font-size:11px">Region</b>
+      </div></div></details>
+    <details class="sec"><summary>Regions <span class="tag" id="regTag"></span></summary><div>
       ${REGIONS.map(r=>`<label><input type="checkbox" data-region="${r}" checked> ${r}</label>`).join("")}
-    </div>
-    <div class="layers"><b style="font-size:11px">Colour by</b>
-      <div class="seg"><button id="mYear" class="on">Year</button><button id="mDoy">Day of year</button></div>
-      <div class="sub">Pick one year to watch a season progress.</div></div>
-    <div class="layers">
+    </div></details>
+    <details class="sec" open><summary>Layers</summary><div>
       <label><input type="checkbox" data-kind="lc"> Land cover (&asymp;120 m over fires)</label>
       <label><input type="checkbox" data-kind="per" checked> Fire perimeters</label>
       <label style="margin-left:18px"><input type="checkbox" id="perOutline"> outline only</label>
@@ -1627,19 +1682,21 @@ panel.onAdd = () => {
       <label><input type="checkbox" data-kind="ign" checked> Fire ignitions</label>
       <label><input type="checkbox" data-kind="pcb" checked> pyroCb events</label>
       <label><input type="checkbox" data-kind="orp" checked> Flag unmatched pyroCb</label>
-    </div>
-    <div class="layers">
       <label><input type="checkbox" id="hideOrp"> Hide unmatched pyroCb</label>
-    </div>
-    <div class="layers"><b style="font-size:11px">pyroCb position</b>
+    </div></details>
+    <details class="sec"><summary>Colour by <span class="tag" id="colTag">year</span></summary><div>
+      <div class="seg"><button id="mYear" class="on">Year</button><button id="mDoy">Day of year</button></div>
+      <div class="sub">Pick one year to watch a season progress.</div></div></details>
+    <details class="sec"><summary>pyroCb position</summary><div>
       <div class="seg"><button id="posRep" class="on">As reported</button><button id="posFire">Matched fire</button></div>
-      <label><input type="checkbox" id="showErr"> show &plusmn;0.1&deg; report uncertainty</label>
-      <div class="sub">93 % of atlas coordinates are rounded to 0.1&deg; (~11 km N-S).
-      "Matched fire" re-plots each event on the centroid of its own 6 h pre-onset burn,
-      which is known to one 375 m VIIRS pixel.</div></div>
-    <div class="layers"><b style="font-size:11px">pyroCb click</b>
+      <label><input type="checkbox" id="showErr"> show report uncertainty box</label>
+      <div class="sub">93 % of atlas coordinates are rounded to 0.1&deg; (~11 km N-S); the
+      box is drawn at that grid (tighter for the few finer ones). "Matched fire" re-plots
+      each event on the centroid of its own 6 h pre-onset burn, known to one 375 m pixel.</div>
+      </div></details>
+    <details class="sec"><summary>pyroCb click</summary><div>
       <div class="seg"><button id="dPanel" class="on">Info panel</button><button id="dPopup">Popup</button></div>
-      <label><input type="checkbox" id="fitSel"> Zoom map to event on select</label></div>`;
+      <label><input type="checkbox" id="fitSel"> Zoom map to event on select</label></div></details>`;
   L.DomEvent.disableClickPropagation(d); L.DomEvent.disableScrollPropagation(d);
   d.querySelectorAll(".chip").forEach(c=>c.onclick=()=>{
     const y=+c.dataset.year; activeYears.has(y)?activeYears.delete(y):activeYears.add(y); refresh();});
@@ -1647,8 +1704,12 @@ panel.onAdd = () => {
   d.querySelector("#noneY").onclick = ()=>{activeYears.clear(); refresh();};
   d.querySelectorAll("input[data-kind]").forEach(i=>i.onchange=()=>{
     showKind[i.dataset.kind]=i.checked; refresh(); if (i.dataset.kind==="lc") drawLegend();});
+  const regTag = () => { const on = REGIONS.filter(r=>showRegion[r]);
+    d.querySelector("#regTag").textContent =
+      on.length===REGIONS.length ? "all" : on.length ? on.join(", ") : "none"; };
   d.querySelectorAll("input[data-region]").forEach(i=>i.onchange=()=>{
-    showRegion[i.dataset.region]=i.checked; forceFilter(); updateGBar();});
+    showRegion[i.dataset.region]=i.checked; regTag(); forceFilter(); updateGBar();});
+  regTag();
   d.querySelector("#hideOrp").onchange = e=>{hideOrphans=e.target.checked; refresh();};
   d.querySelector("#fitSel").onchange = e=>{FIT_ON_SELECT=e.target.checked;};
   d.querySelector("#perOutline").onchange = e=>{OUTLINE.per=e.target.checked; forceFilter();};
@@ -1657,9 +1718,11 @@ panel.onAdd = () => {
     BAND_SRC=b.dataset.b;
     d.querySelectorAll("#bndSrcSeg button").forEach(x=>x.classList.toggle("on",x===b));
     refresh();});
-  const my=d.querySelector("#mYear"), mdy=d.querySelector("#mDoy");
-  my.onclick  = ()=>{MODE="year"; my.classList.add("on"); mdy.classList.remove("on"); recolour();};
-  mdy.onclick = ()=>{MODE="doy";  mdy.classList.add("on"); my.classList.remove("on"); recolour();};
+  const my=d.querySelector("#mYear"), mdy=d.querySelector("#mDoy"), colTag=d.querySelector("#colTag");
+  my.onclick  = ()=>{MODE="year"; my.classList.add("on"); mdy.classList.remove("on");
+    colTag.textContent="year"; recolour();};
+  mdy.onclick = ()=>{MODE="doy";  mdy.classList.add("on"); my.classList.remove("on");
+    colTag.textContent="day of year"; recolour();};
   const pr=d.querySelector("#posRep"), pf=d.querySelector("#posFire");
   pr.onclick = ()=>{PCB_POS="report"; pr.classList.add("on"); pf.classList.remove("on"); repositionPcb();};
   pf.onclick = ()=>{PCB_POS="fire";   pf.classList.add("on"); pr.classList.remove("on"); repositionPcb();};
@@ -1673,6 +1736,7 @@ panel.onAdd = () => {
   // animate controls
   d.querySelectorAll("#gmodeSeg button").forEach(b=>b.onclick=()=>{
     d.querySelectorAll("#gmodeSeg button").forEach(x=>x.classList.toggle("on",x===b));
+    d.querySelector("#animTag").textContent = b.dataset.g === "off" ? "" : b.dataset.g;
     setAnimMode(b.dataset.g);});
   d.querySelectorAll("#gspdSeg button").forEach(b=>b.onclick=()=>{
     gStepSec=+b.dataset.s;
@@ -1703,12 +1767,25 @@ function rebindPopups(y){
 panel.addTo(map);
 
 const legend = L.control({position:"bottomright"});
-let legendDiv;
-legend.onAdd = () => { legendDiv = L.DomUtil.create("div","panel legend"); drawLegend(); return legendDiv; };
+let legendDiv, legendBody, legendOpen = true;
+legend.onAdd = () => {
+  legendDiv = L.DomUtil.create("div","panel legend");
+  legendDiv.innerHTML = `<h4 id="legHd" style="cursor:pointer;user-select:none">`
+    + `<span id="legCaret">&#9662;</span> Legend</h4><div id="legBody"></div>`;
+  legendBody = legendDiv.querySelector("#legBody");
+  legendDiv.querySelector("#legHd").onclick = () => {
+    legendOpen = !legendOpen;
+    legendBody.style.display = legendOpen ? "" : "none";
+    legendDiv.querySelector("#legCaret").innerHTML = legendOpen ? "&#9662;" : "&#9656;";
+  };
+  L.DomEvent.disableClickPropagation(legendDiv); L.DomEvent.disableScrollPropagation(legendDiv);
+  drawLegend();
+  return legendDiv;
+};
 legend.addTo(map);
 
 function drawLegend(){
-  if (!legendDiv) return;
+  if (!legendBody) return;
   const common = `<div class="row"><i class="sq" style="background:#888"></i>Fire perimeter</div>
     <div class="row"><svg width="15" height="15" viewBox="0 0 20 20" style="flex:none">
       <path d="${STAR}" fill="#888" stroke="#111" stroke-width="1.4" stroke-linejoin="round"/></svg>
@@ -1731,7 +1808,7 @@ function drawLegend(){
         + ` 10 km polygons beyond. Exact 30 m composition is in the pyroCb info panel.</div>`
         + `</div></details>` : "");
   if (MODE==="year"){
-    legendDiv.innerHTML = `<h4>Boreal fires &amp; pyroCb</h4>${common}
+    legendBody.innerHTML = `${common}
       <div class="sub" style="margin:6px 0 3px">Colour = year</div>
       <div class="chips">${YEARS.map(y=>
         `<span class="chip on" style="background:${YCOL[y]};cursor:default">${y}</span>`).join("")}</div>`;
@@ -1740,7 +1817,7 @@ function drawLegend(){
     const mid = Math.round((DOY0+DOY1)/2);
     const md = d => { const t=new Date(2001,0,1); t.setDate(d);
       return t.toLocaleString("en",{month:"short"}); };
-    legendDiv.innerHTML = `<h4>Boreal fires &amp; pyroCb</h4>${common}
+    legendBody.innerHTML = `${common}
       <div class="sub" style="margin:6px 0 3px">Colour = day of year</div>
       <div id="bar" style="background:linear-gradient(90deg,${stops})"></div>
       <div id="barlab"><span>${md(DOY0)} (${DOY0})</span><span>${md(mid)}</span><span>${md(DOY1)} (${DOY1})</span></div>`;
@@ -1829,6 +1906,17 @@ const animYear = () => [...activeYears].sort((a,b)=>a-b)[0] ?? YEARS[YEARS.lengt
 // "as reported" is a neighbourhood, not a point. "Matched fire" moves each event onto
 // the centroid of its own 6 h pre-onset active burn, which is good to one 375 m pixel.
 let errLayer = null;
+// Is this pyroCb marker actually on screen right now? (region + date filters + the
+// "hide unmatched" toggle + the layer checkbox). The uncertainty box must obey the
+// same rules, so a hidden event never leaves a stray box behind.
+function pcbShown(ft){
+  const p = ft.properties;
+  if (!showKind.pcb) return false;
+  if (!regionOK(ft)) return false;
+  if (hideOrphans && p.match_method === "unmatched") return false;
+  if (dateFilterDoy != null && !(p.doy != null && p.doy <= dateFilterDoy)) return false;
+  return true;
+}
 function repositionPcb(){
   if (errLayer){ map.removeLayer(errLayer); errLayer = null; }
   if (SHOW_ERR) errLayer = L.layerGroup().addTo(map);
@@ -1842,8 +1930,9 @@ function repositionPcb(){
     if (errLayer && PCB_POS === "report" && activeYears.has(+y) && c.pcb)
       c.pcb.eachLayer(l => {
         const p = l.feature.properties, g = l.feature.geometry.coordinates;
-        if (!p.loc_rounded || !regionOK(l.feature)) return;
-        L.rectangle([[g[1]-0.05, g[0]-0.05],[g[1]+0.05, g[0]+0.05]],
+        if (!pcbShown(l.feature)) return;
+        const h = (p.loc_prec || 0.1) / 2;           // half the atlas grid cell
+        L.rectangle([[g[1]-h, g[0]-h],[g[1]+h, g[0]+h]],
           {pane:"orp", renderer:R.orp, color:"#e11", weight:1, opacity:0.7,
            dashArray:"3 3", fill:false, interactive:false}).addTo(errLayer);
       });
