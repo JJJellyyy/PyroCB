@@ -318,7 +318,7 @@ def smooth_for_map(gser, close_m, simp_m):
     g = gser.buffer(close_m, join_style="mitre").buffer(-close_m, join_style="mitre")
     return g.simplify(simp_m, preserve_topology=True)
 
-payloads, doys = {}, []
+payloads, doys, spread_by_year = {}, [], {}
 for y in YEARS:
     per = io.read_final(y, metric=False)
     per["geometry"] = per.geometry.simplify(C.SIMPLIFY_TOL, preserve_topology=True)
@@ -430,6 +430,11 @@ for y in YEARS:
     sim = pipeline.firesim_cached(y, events, linked) if (len(ev_y) and linked) else {}
     b64["sim"], _, gsim = pack(sim)
 
+    # 12-hourly spread-rate series per fire, for the animation's colour modes.
+    spr = pipeline.spread_steps_cached(y, linked) if linked else {}
+    spread_by_year[str(y)] = spr
+    b64["spr"], _, gspr = pack(spr)
+
     payloads[y] = b64
     _nsim = sum(v["n_cell"] for v in sim.values())
     _npix = sum(len(v["di"]) for v in px.values())
@@ -437,8 +442,15 @@ for y in YEARS:
           f"  {0 if bg is None else len(bg):>3} bands"
           f" | pix {_npix:>7} cells {gpx/1e6:4.2f}MB"
           f" | sim {len(sim):>3} fires {_nsim:>7} cells {gsim/1e6:4.2f}MB"
+          f" | spr {gspr/1e6:4.2f}MB"
           f" | lc {glc/1e6:4.2f}MB poly + {gpng/1e6:4.2f}MB png({len(lcpng)})",
           flush=True)
+
+from pyrocb import spread as _SP
+SPREAD_CLAMP = _SP.clamp(spread_by_year)
+print(f"\nspread ramp clamp (p2..p98 non-zero): "
+      f"avgspread {SPREAD_CLAMP['av'][0]:.0f}..{SPREAD_CLAMP['av'][1]:.0f} m/12h, "
+      f"spread95 {SPREAD_CLAMP['s95'][0]:.0f}..{SPREAD_CLAMP['s95'][1]:.0f} m/12h")
 
 # Fit the DOY window to the whole dataset, weighted by BURNED AREA. Weighting matters:
 # an unweighted percentile over fire counts is dragged to (16, 349) by tiny January crop
@@ -476,6 +488,29 @@ DATA_JS   = json.dumps({str(y): payloads[y] for y in YEARS})
 YEARS_JS  = json.dumps(YEARS)
 COLORS_JS = json.dumps({str(y): C.YEAR_COLORS[y] for y in YEARS})
 RAMP_JS   = json.dumps(C.DOY_RAMP)
+SPREAD_CLAMP_JS = json.dumps(SPREAD_CLAMP)
+
+# One month-by-month pyroCb count table per year, for the global playback bar's
+# single-year mode (ticks Mar..Oct, each labelled with that month's event count).
+_mc = (pcb_all.assign(m=pcb_all.datetime.dt.month)
+       .groupby(["year", "m"]).size().unstack(fill_value=0))
+MONTH_COUNTS_JS = json.dumps({str(y): {int(m): int(_mc.loc[y, m])
+                                       for m in range(3, 11) if m in _mc.columns and y in _mc.index}
+                              for y in YEARS})
+
+# Tiny global index for the "find a fire" search box: one row per event, every year,
+# so a search hits regardless of which years are currently loaded.
+_si = (events if len(events) else pcb_all).copy()
+_si_cols = {"pcb_id": "id", "fire_name": "nm", "mergid": "mg", "year": "y",
+            "lat": "la", "lon": "lo", "datetime": "dt"}
+_si = _si[[c for c in _si_cols if c in _si.columns]].rename(columns=_si_cols)
+if "dt" in _si:
+    _si["dt"] = pd.to_datetime(_si["dt"]).dt.strftime("%Y-%m-%d")
+_si["nm"] = _si["nm"].astype("string").fillna("")
+_si["mg"] = pd.to_numeric(_si.get("mg"), errors="coerce")
+SEARCH_JS = json.dumps([{k: (None if (isinstance(v, float) and pd.isna(v)) else v)
+                         for k, v in r.items()}
+                        for r in _si.round({"la": 4, "lo": 4}).to_dict("records")])
 
 HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -530,9 +565,37 @@ HTML = """<!DOCTYPE html>
   .ignstar span{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
      font:700 8px system-ui;color:#fff;text-shadow:0 0 2px #000,0 0 2px #000;pointer-events:none}
   .leaflet-popup-content{font:12px/1.45 system-ui,sans-serif;max-height:340px;overflow:auto}
-  #busy{position:absolute;z-index:9999;top:12px;left:50%;transform:translateX(-50%);
+  #busy{position:absolute;z-index:9999;top:48px;left:50%;transform:translateX(-50%);
         background:#222;color:#fff;padding:6px 14px;border-radius:14px;font:12px system-ui;display:none}
-  #notice{position:absolute;z-index:9999;top:12px;left:50%;transform:translateX(-50%);
+  /* find-a-fire search */
+  #search{position:absolute;z-index:9997;top:10px;left:50%;transform:translateX(-50%);
+        width:min(360px,70vw);font:12px system-ui}
+  #search input{width:100%;box-sizing:border-box;padding:6px 10px;border:1px solid #999;
+        border-radius:16px;box-shadow:0 1px 5px rgba(0,0,0,.35);outline:none}
+  #search ul{list-style:none;margin:3px 0 0;padding:0;background:#fff;border:1px solid #ccc;
+        border-radius:8px;box-shadow:0 2px 12px rgba(0,0,0,.3);max-height:46vh;overflow:auto;display:none}
+  #search li{padding:5px 10px;cursor:pointer;border-bottom:1px solid #f0f0f0}
+  #search li:last-child{border-bottom:none}
+  #search li:hover,#search li.sel{background:#eef3ff}
+  #search li b{font-weight:700}
+  #search li span{color:#666}
+  /* global playback bar */
+  #gbar{position:absolute;z-index:9996;bottom:14px;left:50%;transform:translateX(-50%);
+        width:min(720px,92vw);background:rgba(255,255,255,.96);border:1px solid #bbb;
+        border-radius:10px;box-shadow:0 2px 14px rgba(0,0,0,.3);padding:7px 12px 9px;
+        font:12px system-ui;display:none}
+  #gbar .grow{display:flex;align-items:center;gap:10px}
+  #gbar #gplay{border:1px solid #bbb;background:#f7f7f7;border-radius:5px;min-width:30px;
+        padding:3px 7px;cursor:pointer;font-size:12px}
+  #gbar #glabel{font-weight:700;white-space:nowrap}
+  #gbar #gsub{color:#666;white-space:nowrap;margin-left:auto}
+  #gbar #gtrackwrap{position:relative;margin-top:8px}
+  #gbar #gscrub{width:100%;margin:0;display:block}
+  #gbar #gticks{position:absolute;left:0;right:0;top:-3px;height:14px;pointer-events:none;
+        display:flex;justify-content:space-between}
+  #gbar #gticks span{font-size:9.5px;color:#555;transform:translateX(-50%);white-space:nowrap}
+  #gbar #gticks span.hot{color:#7d1128;font-weight:700}
+  #notice{position:absolute;z-index:9999;top:48px;left:50%;transform:translateX(-50%);
         max-width:420px;background:#fff3cd;color:#664d03;border:1px solid #ffda6a;
         padding:8px 14px;border-radius:8px;font:12px/1.4 system-ui;display:none;
         box-shadow:0 2px 10px rgba(0,0,0,.25)}
@@ -564,13 +627,16 @@ HTML = """<!DOCTYPE html>
   #info .player{display:flex;align-items:center;gap:8px;margin:6px 0 1px}
   #info #cur{font-weight:700;white-space:nowrap}
   #info #curabs{color:#666;font-size:11px;white-space:nowrap}
-  #info #scrubwrap{position:relative;margin:7px 0 4px}
-  #info #scrub{width:100%;margin:0;display:block}
-  #info #ticks{position:absolute;left:0;right:0;top:-7px;height:10px;pointer-events:none}
-  #info #ticks b{position:absolute;top:0;width:8px;height:8px;margin-left:-4px;
-     background:#7d1128;border:1px solid #fff;border-radius:2px;transform:rotate(45deg);
-     cursor:pointer;pointer-events:auto;box-shadow:0 0 2px rgba(0,0,0,.5)}
-  #info #ticks b:hover{background:#e11;transform:rotate(45deg) scale(1.35)}
+  #info #scrubwrap{position:relative;margin:7px 0 4px;padding-top:16px}
+  #info #scrub{width:100%;margin:0;display:block;position:relative;z-index:1}
+  #info #ticks{position:absolute;left:0;right:0;top:0;pointer-events:none}
+  #info #ticks b{position:absolute;top:0;width:14px;height:14px;margin-left:-7px;
+     background:#7d1128;color:#fff;font:700 8px/14px system-ui;text-align:center;
+     border:1px solid #fff;border-radius:3px;cursor:pointer;pointer-events:auto;
+     box-shadow:0 0 2px rgba(0,0,0,.5)}
+  #info #ticks b.staggered::after{content:"";position:absolute;left:6px;top:13px;width:1px;
+     background:rgba(125,17,40,.5);height:40px}
+  #info #ticks b:hover{background:#e11;z-index:3;transform:scale(1.25)}
   #info #loopCustom{width:46px;margin-left:6px;font:11px system-ui;padding:2px 4px;
      border:1px solid #bbb;border-radius:4px}
   @keyframes pcbpulse{0%{transform:scale(.3);opacity:.9}100%{transform:scale(3.4);opacity:0}}
@@ -580,12 +646,21 @@ HTML = """<!DOCTYPE html>
 </head>
 <body>
 <div id="map"></div>
+<div id="search"><input type="text" placeholder="find a fire &mdash; pyroCb id, fire name, or merge id" autocomplete="off"><ul></ul></div>
 <div id="busy">Loading&hellip;</div>
 <div id="notice"></div>
 <div id="info"></div>
+<div id="gbar"><div class="grow"><button id="gplay" title="play / pause">&#9654;</button>
+  <span id="glabel"></span><span id="gsub"></span></div>
+  <div id="gtrackwrap"><div id="gticks"></div>
+  <input type="range" id="gscrub" min="0" max="1000" step="1" value="1000"></div></div>
 <script>
 const DATA=__DATA__, YEARS=__YEARS__, YCOL=__COLORS__, RAMP=__RAMP__;
 const DOY0=__DOY0__, DOY1=__DOY1__, ORPHAN_KM=__ORPHAN__;
+const SPREAD_CLAMP=__SPREADCLAMP__, MONTH_COUNTS=__MONTHCOUNTS__, SEARCH=__SEARCH__;
+const MONTH_ABBR=["","Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+// day-of-year for the 1st of a given month (non-leap; fires are Mar-Oct so leap day is moot)
+const MONTH_DOY=[0,1,32,60,91,121,152,182,213,244,274,305,335,366];
 
 async function unpack(b64){
   const bin = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
@@ -609,8 +684,21 @@ function hideNotice(){ noticeEl.style.display = "none"; }
 // the pyroCb), keyed by the globally unique pcb_id so a click works no matter which
 // years are toggled on. Each entry: {o:[lat,lon], dlat:[], dlon:[], hw:[], hh:[], t:[]}.
 const byPcbPix = {};
-// mergid -> whole-fire series {t0, dur_h, pcb_h, pcb_ll, pcb_id, g, n_raw, n_cell}.
+// mergid -> whole-fire series {t0, dur_h, pcb_h, pcb_ix, pcb_ll, pcb_id, g, n_raw, n_cell}.
 const byFireSim = {};
+// mergid -> 12-hourly spread series {t:[iso], av:[m/12h], s95:[m/12h]}, decoded lazily.
+const bySpread = {};
+const _spDec = new WeakMap();
+function decodeSpread(s){
+  if (!s || !s.t || !s.t.length) return null;
+  let d = _spDec.get(s);
+  if (d) return d;
+  const n = s.t.length, ms = new Float64Array(n);
+  for (let k = 0; k < n; k++) ms[k] = Date.parse(s.t[k] + "Z");
+  d = {n, ms, av:s.av, s95:s.s95};
+  _spDec.set(s, d);
+  return d;
+}
 
 // ---- fire-activity grid ---------------------------------------------------
 // Payloads are delta-coded, TIME-SORTED cell grids in Web Mercator (burngrid.py).
@@ -639,11 +727,24 @@ function decodeGrid(p){
 function ubound(t, n, v){ let lo=0, hi=n; while(lo<hi){const m=(lo+hi)>>1; if(t[m]<=v) lo=m+1; else hi=m;} return lo; }
 function lbound(t, n, v){ let lo=0, hi=n; while(lo<hi){const m=(lo+hi)>>1; if(t[m]< v) lo=m+1; else hi=m;} return lo; }
 
-// Burn age ramp: embers (earliest) -> active flame (latest). Cells are time-sorted so
-// the colour only changes a handful of times per repaint, and because the ramp is keyed
-// to absolute time (not the visible range) incremental drawing stays correct.
-const BURN_RAMP = ["#4a1109","#7d1e0b","#a82c0d","#cc3f10","#e35814","#f2741b",
-                   "#fb8c26","#ff9f33","#ffb245","#ffc45c","#ffd479","#ffe6a8"];
+// Animation colour modes. "age" is a PURPLE ramp (old -> new) on purpose: red/yellow
+// reads as fire *intensity*, which this is not. "av"/"s95" DO use a red->yellow ramp,
+// there deliberately meaning speed - deep red = fast spread, yellow = slow - from the
+// 12-hourly avgspread / spread95 snapshot attributes.
+const AGE_STOPS    = ["#2c0b52","#43217a","#5c34a6","#7a51c7","#9c78dd","#c1a6ec","#ecdcfb"];
+const SPREAD_STOPS = ["#ffe98a","#ffcf5c","#ffab33","#ff7a1f","#f24a12","#c81e0c","#7d0000"];
+function _bandArray(stops, n){
+  const out = [];
+  for (let k = 0; k < n; k++){
+    const x = k/(n-1)*(stops.length-1), i = Math.min(stops.length-2, x|0), f = x-i;
+    const a = hex2rgb(stops[i]), b = hex2rgb(stops[i+1]);
+    out.push(rgb2hex(a.map((v,q)=>v+(b[q]-v)*f)));
+  }
+  return out;
+}
+const AGE_BANDS = _bandArray(AGE_STOPS, 20), SPREAD_BANDS = _bandArray(SPREAD_STOPS, 20);
+let BURN_COLOR_MODE = "age";           // "age" | "av" | "s95"
+const BURN_MODE_LABEL = {age:"burn age", av:"avg spread", s95:"spread p95"};
 
 // Subclasses L.Renderer rather than L.Layer so Leaflet's own container positioning
 // and zoom-animation transform bookkeeping come for free - the same machinery L.Canvas
@@ -653,6 +754,7 @@ const BurnLayer = L.Renderer.extend({
   initialize(opts){
     L.Renderer.prototype.initialize.call(this, opts);
     this._g=null; this._range=[0,0]; this._drawn=null; this._span=1; this._t0=0;
+    this._absT0=0; this._sp=null;         // grid t=0 in ms UTC; decoded spread series
   },
   _initContainer(){
     const c = this._container = document.createElement("canvas");
@@ -666,11 +768,19 @@ const BurnLayer = L.Renderer.extend({
     L.DomEvent.off(this._container);
     delete this._container;
   },
-  setGrid(grid, span, t0){
+  setGrid(grid, span, t0, absT0, spread){
     this._g = grid; this._span = Math.max(1e-6, span||1); this._t0 = t0||0;
+    this._absT0 = absT0||0; this._sp = decodeSpread(spread);
     this._range = [0,0]; this._drawn = null; this._blank();
   },
-  clear(){ this._g = null; this._range=[0,0]; this._drawn=null; this._blank(); },
+  setContext(span, t0, absT0, spread){
+    this._span = Math.max(1e-6, span||1); this._t0 = t0||0;
+    this._absT0 = absT0||0; this._sp = decodeSpread(spread);
+  },
+  repaint(){ if (!this._g) return;
+    const r = this._range; this._drawn = null; this._blank();
+    this._paint(r[0], r[1]); this._drawn = [r[0], r[1]]; },
+  clear(){ this._g = null; this._sp = null; this._range=[0,0]; this._drawn=null; this._blank(); },
   _onZoomEnd(){},                       // Renderer binds this; only L.Canvas defines it
   count(){ return this._range[1] - this._range[0]; },
   setRange(i0, i1){
@@ -713,12 +823,29 @@ const BurnLayer = L.Renderer.extend({
     const w = Math.max(1, S + 0.6);
     const x0 = b.min.x - w, x1 = b.max.x, y0 = b.min.y - w, y1 = b.max.y;
     const ix = g.ix, iy = g.iy, t = g.t, span = this._span, t0 = this._t0;
+    const mode = BURN_COLOR_MODE, sp = this._sp;
+    const bands = (mode === "age" || !sp) ? AGE_BANDS : SPREAD_BANDS;
+    const NB = bands.length;
+    // spread modes: a forward pointer into the 12-hourly series (cells are time-sorted)
+    const spOn = mode !== "age" && sp;
+    const cl = spOn ? SPREAD_CLAMP[mode] : null;
+    const spArr = spOn ? (mode === "av" ? sp.av : sp.s95) : null;
+    let spi = 0;
+    if (spOn){ const ms0 = this._absT0 + t[i0]*3600000;
+      while (spi + 1 < sp.n && ms0 >= sp.ms[spi + 1]) spi++; }
     ctx.globalAlpha = 0.66;
     let band = -1;
     for (let k = i0; k < i1; k++){
-      const bnd = Math.min(BURN_RAMP.length-1,
-                           Math.max(0, ((t[k]-t0)/span*BURN_RAMP.length)|0));
-      if (bnd !== band){ band = bnd; ctx.fillStyle = BURN_RAMP[bnd]; }
+      let tt;
+      if (spOn){
+        const ms = this._absT0 + t[k]*3600000;
+        while (spi + 1 < sp.n && ms >= sp.ms[spi + 1]) spi++;
+        tt = (spArr[spi] - cl[0]) / Math.max(1e-6, cl[1] - cl[0]);
+      } else {
+        tt = (t[k]-t0)/span;
+      }
+      const bnd = Math.min(NB-1, Math.max(0, (tt*NB)|0));
+      if (bnd !== band){ band = bnd; ctx.fillStyle = bands[bnd]; }
       const x = ix[k]*S + PX, y = PY - (iy[k]+1)*S;
       if (x < x0 || y < y0 || x > x1 || y > y1) continue;
       ctx.fillRect(x, y, w, w);
@@ -749,25 +876,33 @@ const fmtDur = h => { const d = Math.floor(h/24);
   return d ? d+" d "+Math.round(h-24*d)+" h" : Math.round(h)+" h"; };
 
 // Show a grid over an inclusive time range; returns {n, nb} (cells, cells before onset).
-function showGrid(payload, lo, hi, span, t0, {fit=false}={}){
+// `o` carries: span, rampT0 (hours), absT0Ms (grid t=0 in ms UTC), mergid, fit.
+function showGrid(payload, lo, hi, o){
+  o = o || {};
+  const span = o.span||1, rampT0 = o.rampT0||0;
   const g = decodeGrid(payload);
   if (!burn) return {n:0, nb:0};
   if (!g){ burn.clear(); return {n:0, nb:0}; }
-  if (burn._g !== g) burn.setGrid(g, span, t0);
-  else { burn._span = Math.max(1e-6, span||1); burn._t0 = t0||0; }
+  const spr = o.mergid!=null ? bySpread[o.mergid] : null;
+  if (burn._g !== g) burn.setGrid(g, span, rampT0, o.absT0Ms||0, spr);
+  else burn.setContext(span, rampT0, o.absT0Ms||0, spr);
   const i0 = lbound(g.t, g.n, lo), i1 = ubound(g.t, g.n, hi);
   const n = burn.setRange(i0, i1);
   const z = Math.min(Math.max(lbound(g.t, g.n, 0), i0), i1);
-  if (fit && FIT_ON_SELECT && n){
+  if (o.fit && FIT_ON_SELECT && n){
     const bb = burn.gridBounds();
     if (bb) try { map.fitBounds(bb.pad(0.25), {maxZoom:11}); } catch(e){}
   }
   return {n, nb: z - i0};
 }
 
+// t=0 of a +/-24 h window grid in ms UTC = the event's onset.
+const winAbsT0 = p => Date.parse(String(p.datetime).replace(" ", "T") + "Z");
+
 // Static wrapper used by popup mode and the panel's Static tab.
 function renderActiveWindow(p, pre, post){
-  const {n, nb} = showGrid(byPcbPix[p.pcb_id], -pre, post, 48, -24, {fit:true});
+  const {n, nb} = showGrid(byPcbPix[p.pcb_id], -pre, post,
+    {span:48, rampT0:-24, absT0Ms:winAbsT0(p), mergid:p.mergid, fit:true});
   if (p.active_is_blowup){
     showNotice("warn", `<b>&#9888; Blow-up fire</b> No VIIRS detections before onset &mdash; `
       +`first seen by the overpass <i>after</i> the pyroCb (FINDINGS F4). This is post-onset burning.`);
@@ -787,7 +922,8 @@ const infoEl = document.getElementById("info");
 L.DomEvent.disableClickPropagation(infoEl); L.DomEvent.disableScrollPropagation(infoEl);
 let animReq = null;
 function stopAnim(){ if (animReq){ cancelAnimationFrame(animReq); animReq = null; } }
-function closeInfo(){ stopAnim(); infoEl.style.display = "none"; clearHighlight(); clearPops(); hideNotice(); }
+function closeInfo(){ stopAnim(); infoEl.style.display = "none"; clearHighlight(); clearPops();
+  hideNotice(); if (typeof updateGBar === "function") updateGBar(); }
 
 function openInfoPanel(p){
   stopAnim();
@@ -829,13 +965,14 @@ function openInfoPanel(p){
       +`<label>${seg("as","Cumulative","Sliding")}</label>`
       +`<label id="slwRow" hidden>window <span class="seg" id="slwSeg">`
         + [6,24,48,168].map(s=>`<button data-h="${s}">${s>=168?"1 wk":s+" h"}</button>`).join("") + `</span></label>`
-      +`<div id="tierkey" style="color:#666;font-size:11px" hidden>`
-        +`Colour = burn age: <span style="color:#4a1109">&#9632;</span> first`
-        +` &rarr; <span style="color:#ffe6a8;text-shadow:0 0 1px #999">&#9632;</span> last.`
-        +` Click a <span style="color:#7d1128">&#9670;</span> to jump to that pyroCb.</div></div>`
+      +`<label>colour <span class="seg" id="cmSeg">`
+        +`<button data-m="age" class="on">burn age</button>`
+        +`<button data-m="av"${bySpread[p.mergid]?"":" disabled title='no spread series for this fire'"}>avg spread</button>`
+        +`<button data-m="s95"${bySpread[p.mergid]?"":" disabled"}>spread p95</button></span></label>`
+      +`<div id="tierkey" style="color:#666;font-size:11px"></div></div>`
     +`<div class="rd" id="rd"></div>`
-    +`<div style="color:#666;font-size:11px">VIIRS active fire on a 375 m grid,`
-    +` localised to this fire.</div>`
+    +`<div style="color:#666;font-size:11px">VIIRS active fire, 375 m grid, this fire only.`
+    +` Steps snap to the 12 h VIIRS overpass cadence.</div>`
     +`</div></div>`;
   infoEl.style.display = "block";
   infoEl.querySelector(".x").onclick = closeInfo;
@@ -870,11 +1007,29 @@ function openInfoPanel(p){
   // and jumping to an event all work without special cases.
   const fsim = byFireSim[p.mergid];
   let animScope = "win";                 // "win" | "fire"
-  let animU = 0, lastTs = 0, prevCur = null;
+  let animU = 0, lastTs = 0, prevCur = null, snapPts = [];
   const scrub = $("#scrub"), playBtn = $("#play");
   const spanOf = () => (animScope === "fire" && fsim) ? Math.max(1e-6, fsim.dur_h) : 48;
   const t0Of   = () => (animScope === "fire" && fsim) ? 0 : -24;
+  const absT0Of = () => (animScope === "fire" && fsim)
+    ? Date.parse(String(fsim.t0).replace(" ", "T") + "Z") : winAbsT0(p);
+  const gridOf  = () => (animScope === "fire" && fsim) ? fsim.g : byPcbPix[p.pcb_id];
   const curOf  = u => t0Of() + u * spanOf();
+  // Everything the map shows is a 12-hourly VIIRS overpass state, so snap the cursor
+  // to the 12 h grid (plus the exact pyroCb onset times, which are worth landing on).
+  const buildSnap = () => {
+    const t0 = t0Of(), sp = spanOf(), pts = [];
+    for (let h = t0; h <= t0 + sp + 1e-6; h += 12) pts.push(Math.min(t0 + sp, h));
+    if (animScope === "fire" && fsim) fsim.pcb_h.forEach(h => { if (h >= t0 && h <= t0+sp) pts.push(h); });
+    snapPts = [...new Set(pts.map(v => +v.toFixed(3)))].sort((a,b)=>a-b);
+  };
+  const snapCur = v => {
+    if (!snapPts.length) return v;
+    let best = snapPts[0], bd = Math.abs(v - best);
+    for (const q of snapPts){ const d = Math.abs(v - q); if (d < bd){ bd = d; best = q; } }
+    return best;
+  };
+  const gridCtx = () => ({span:spanOf(), rampT0:t0Of(), absT0Ms:absT0Of(), mergid:p.mergid});
 
   function pause(){ stopAnim(); lastTs = 0; playBtn.innerHTML = "&#9654;"; }
   function play(){
@@ -884,19 +1039,31 @@ function openInfoPanel(p){
     animReq = requestAnimationFrame(frame);
   }
 
-  // pyroCb markers over the scrubber; click one to jump straight to that onset.
+  // pyroCb markers over the scrubber: numbered, and vertically staggered when several
+  // events fall close together in time so the labels never sit on top of each other.
   const drawTicks = () => {
     const tr = $("#ticks");
     tr.innerHTML = "";
+    tr.style.height = "13px";
     if (animScope !== "fire" || !fsim) return;
-    fsim.pcb_h.forEach((h, i) => {
+    const sp = spanOf();
+    const items = fsim.pcb_h.map((h, i) => ({h, i, x: 100 * h / sp})).sort((a,b) => a.x - b.x);
+    let row = 0, lastX = -99;
+    const MAXROW = 3;
+    items.forEach(it => {
+      row = (it.x - lastX < 4.5) ? (row + 1) % MAXROW : 0;
+      lastX = it.x;
       const b = document.createElement("b");
-      b.title = fsim.pcb_id[i] + "  (" + fmtDur(h) + ")";
-      b.style.left = (100 * h / spanOf()).toFixed(3) + "%";
+      b.textContent = fsim.pcb_ix ? fsim.pcb_ix[it.i] : (it.i + 1);
+      b.title = fsim.pcb_id[it.i] + "  (" + fmtDur(it.h) + ")";
+      b.style.left = it.x.toFixed(3) + "%";
+      b.style.top = (row * 12) + "px";
+      if (row) b.classList.add("staggered");
       b.onclick = ev => { ev.preventDefault(); ev.stopPropagation();
-        pause(); animU = Math.min(1, Math.max(0, h / spanOf())); prevCur = null; render(); };
+        pause(); animU = Math.min(1, Math.max(0, it.h / sp)); prevCur = null; render(); };
       tr.appendChild(b);
     });
+    tr.style.height = (13 + Math.min(MAXROW - 1, items.length) * 12) + "px";
   };
 
   // dark-red dot at every pyroCb whose onset has been reached; a pulsing ring on the
@@ -917,14 +1084,15 @@ function openInfoPanel(p){
   };
 
   function render(){
-    const cur = curOf(animU), lo = animStyle === "cumulative" ? t0Of() : cur - slideW;
+    const cur = snapCur(curOf(animU));
+    const lo = animStyle === "cumulative" ? t0Of() : cur - slideW;
+    const absMs = absT0Of() + cur * 3600e3;
+    const abs = isNaN(absMs) ? "" : new Date(absMs).toISOString().slice(0,16).replace("T"," ") + " UTC";
     if (animScope === "fire" && fsim){
-      const n = showGrid(fsim.g, lo, cur, fsim.dur_h, 0).n;
+      const n = showGrid(fsim.g, lo, cur, gridCtx()).n;
       $("#cur").textContent = fmtDur(cur) + " / " + fmtDur(fsim.dur_h);
-      const ms = Date.parse(fsim.t0.replace(" ", "T") + "Z") + cur*3600e3;
-      $("#curabs").textContent = isNaN(ms) ? ""
-        : new Date(ms).toISOString().slice(0,16).replace("T", " ") + " UTC";
-      rd.innerHTML = `${n} of ${fsim.n_cell} cells &middot; ${fsim.n_raw} raw detections`;
+      $("#curabs").textContent = abs;
+      rd.innerHTML = `${n} of ${fsim.n_cell} cells &middot; coloured by ${BURN_MODE_LABEL[BURN_COLOR_MODE]}`;
       if (prevCur === null || cur < prevCur) prevCur = cur;   // init / loop wrap: no flash
       let flash = -1;
       for (let i = 0; i < fsim.pcb_h.length; i++)
@@ -932,12 +1100,12 @@ function openInfoPanel(p){
       prevCur = cur;
       renderPops(cur, flash);
       if (flash >= 0)
-        rd.innerHTML = `<b style="color:#7d1128">&#9733; pyroCb &mdash; ${esc(fsim.pcb_id[flash])}</b>`
-          + ` &middot; ${fmtDur(cur)}`;
+        rd.innerHTML = `<b style="color:#7d1128">&#9733; pyroCb ${fsim.pcb_ix?("#"+fsim.pcb_ix[flash]+" "):""}`
+          + `&mdash; ${esc(fsim.pcb_id[flash])}</b> &middot; ${fmtDur(cur)}`;
     } else {
-      const {n, nb} = showGrid(byPcbPix[p.pcb_id], lo, cur, 48, -24);
-      $("#cur").textContent = (cur >= 0 ? "+" : "") + cur.toFixed(1) + " h";
-      $("#curabs").textContent = "";
+      const {n, nb} = showGrid(byPcbPix[p.pcb_id], lo, cur, gridCtx());
+      $("#cur").textContent = (cur >= 0 ? "+" : "") + cur.toFixed(0) + " h";
+      $("#curabs").textContent = abs;
       setReadout(null, null, n, nb);
     }
     scrub.value = Math.round(animU * 1000);
@@ -974,17 +1142,38 @@ function openInfoPanel(p){
   pair("#asA","#asB", v => { animStyle = v; $("#slwRow").hidden = v !== "sliding"; render(); },
        "cumulative", "sliding");
 
+  const AGE_KEY = `Colour = burn age: <span style="color:${AGE_STOPS[0]}">&#9632;</span> first`
+    + ` &rarr; <span style="color:${AGE_STOPS[6]};text-shadow:0 0 1px #999">&#9632;</span> last.`;
+  const SPD_KEY = m => `Colour = ${BURN_MODE_LABEL[m]}: `
+    + `<span style="color:${SPREAD_STOPS[0]};text-shadow:0 0 1px #999">&#9632;</span> slow`
+    + ` &rarr; <span style="color:${SPREAD_STOPS[6]}">&#9632;</span> fast`
+    + ` (${SPREAD_CLAMP[m][0].toFixed(0)}&ndash;${SPREAD_CLAMP[m][1].toFixed(0)} m / 12 h).`;
+  const setColourKey = () => {
+    $("#tierkey").innerHTML = (BURN_COLOR_MODE === "age" ? AGE_KEY : SPD_KEY(BURN_COLOR_MODE))
+      + ` Click a numbered <span style="color:#7d1128">&#9670;</span> to jump to that pyroCb.`;
+  };
+  if (BURN_COLOR_MODE !== "age" && !bySpread[p.mergid]) BURN_COLOR_MODE = "age";
+  const cmBtns = [...$("#cmSeg").querySelectorAll("button")];
+  cmBtns.forEach(b => {
+    b.classList.toggle("on", b.dataset.m === BURN_COLOR_MODE);
+    b.onclick = () => {
+      if (b.disabled) return;
+      BURN_COLOR_MODE = b.dataset.m;
+      cmBtns.forEach(x => x.classList.toggle("on", x === b));
+      setColourKey();
+      burn.setContext(spanOf(), t0Of(), absT0Of(), bySpread[p.mergid]); burn.repaint();
+    };
+  });
+
   const setScope = s => {
     if (s === "fire" && !fsim) s = "win";
     animScope = s; prevCur = null; pause();
     $("#scA").classList.toggle("on", s === "win"); $("#scB").classList.toggle("on", s === "fire");
-    $("#tierkey").hidden = s !== "fire";
     if (s !== "fire") clearPops();
-    drawTicks();
+    buildSnap(); drawTicks(); setColourKey();
     // Show the whole extent first, so you can see what you are about to animate;
     // pressing play rewinds to the start.
-    showGrid(s === "fire" ? fsim.g : byPcbPix[p.pcb_id],
-             t0Of(), t0Of() + spanOf(), spanOf(), t0Of(), {fit:true});
+    showGrid(gridOf(), t0Of(), t0Of() + spanOf(), {...gridCtx(), fit:true});
     animU = 1; render();
   };
   $("#scA").onclick = () => setScope("win");
@@ -992,12 +1181,14 @@ function openInfoPanel(p){
 
   $("#pmA").onclick = () => { PANEL_MODE="static"; pause(); clearPops();
     $("#pmA").classList.add("on"); $("#pmB").classList.remove("on");
-    $("#paneStatic").hidden=false; $("#paneAnim").hidden=true; applyStatic(); };
+    $("#paneStatic").hidden=false; $("#paneAnim").hidden=true; applyStatic();
+    if (typeof updateGBar === "function") updateGBar(); };
   $("#pmB").onclick = () => { PANEL_MODE="animate";
     $("#pmB").classList.add("on"); $("#pmA").classList.remove("on");
     $("#paneStatic").hidden=true; $("#paneAnim").hidden=false;
     $("#slwRow").hidden = animStyle!=="sliding";
-    setScope(animScope); };
+    setScope(animScope);
+    if (typeof updateGBar === "function") updateGBar(); };
 
   (PANEL_MODE==="animate" ? $("#pmB") : $("#pmA")).onclick();
 }
@@ -1203,10 +1394,11 @@ function wanted(){
 async function ensureYear(y){
   if (cache[y]) return cache[y];
   const d = DATA[y];
-  const [per,ign,pcb,bnd,pix,lc,sim] = await Promise.all(
-    [d.per,d.ign,d.pcb,d.bnd,d.pix,d.lc,d.sim].map(unpack));
+  const [per,ign,pcb,bnd,pix,lc,sim,spr] = await Promise.all(
+    [d.per,d.ign,d.pcb,d.bnd,d.pix,d.lc,d.sim,d.spr].map(unpack));
   Object.assign(byPcbPix, pix);          // pcb_id -> +/-24 h cell grid
   Object.assign(byFireSim, sim);         // mergid  -> whole-fire series
+  Object.assign(bySpread, spr||{});      // mergid  -> 12-hourly spread series
   // lcpng is already-base64 PNG, so it is embedded raw - gzipping it would only add
   // a second base64 pass over incompressible data.
   cache[y] = buildLayers(y,{per,ign,pcb,bnd,lc,lcpng:d.lcpng||{}});
@@ -1242,6 +1434,8 @@ async function refresh(){
     });
   } while (pending);
   refreshing=false;
+  if (typeof updateGBar === "function") updateGBar();
+  if (dateFilterDoy != null){ _lastFilterDoy = -99; applyDateFilter(); }   // re-mask newly added layers
 }
 
 function recolour(){
@@ -1377,7 +1571,188 @@ function drawLegend(){
   }
 }
 
-refresh();
+// ---- find-a-fire search -------------------------------------------------
+(function(){
+  const box = document.getElementById("search");
+  const inp = box.querySelector("input"), ul = box.querySelector("ul");
+  L.DomEvent.disableClickPropagation(box); L.DomEvent.disableScrollPropagation(box);
+  let hits = [], sel = -1;
+  const hide = () => { ul.style.display = "none"; sel = -1; };
+  const query = q => {
+    q = q.trim().toLowerCase();
+    if (q.length < 2) return [];
+    const num = q.replace(/[^0-9]/g, "");
+    return SEARCH.filter(r =>
+      (r.id && r.id.toLowerCase().includes(q)) ||
+      (r.nm && r.nm.toLowerCase().includes(q)) ||
+      (num && r.mg != null && String(r.mg).includes(num))
+    ).slice(0, 12);
+  };
+  const draw = () => {
+    ul.innerHTML = hits.map((r,i) =>
+      `<li data-i="${i}" class="${i===sel?"sel":""}"><b>${esc(r.id||"")}</b> `
+      + `<span>&middot; ${esc(r.nm||"unnamed")} &middot; fire ${r.mg??"?"} &middot; ${r.y}</span></li>`
+    ).join("");
+    ul.style.display = hits.length ? "block" : "none";
+    ul.querySelectorAll("li").forEach(li =>
+      li.onclick = () => pick(hits[+li.dataset.i]));
+  };
+  async function pick(r){
+    if (!r) return;
+    inp.value = r.id || r.nm || String(r.mg); hide();
+    if (!activeYears.has(r.y)){ activeYears.add(r.y); await refresh(); }
+    else await refresh();
+    if (r.la != null && r.lo != null) map.setView([r.la, r.lo], Math.max(map.getZoom(), 7));
+    const c = cache[r.y]; if (!c) return;
+    let feat = null;
+    c.pcb.eachLayer(l => { if (l.feature && l.feature.properties.pcb_id === r.id) feat = l.feature; });
+    if (!feat && r.mg != null)
+      c.pcb.eachLayer(l => { if (l.feature && +l.feature.properties.mergid === +r.mg) feat = feat || l.feature; });
+    if (feat) (DETAIL_MODE === "panel" ? openInfoPanel(feat.properties)
+                                       : renderActiveWindow(feat.properties, 12, 12));
+  }
+  inp.oninput = () => { hits = query(inp.value); sel = -1; draw(); };
+  inp.onfocus = () => { if (inp.value.trim().length >= 2){ hits = query(inp.value); draw(); } };
+  inp.onkeydown = e => {
+    if (e.key === "Escape"){ inp.value = ""; hide(); inp.blur(); }
+    else if (e.key === "ArrowDown"){ sel = Math.min(hits.length-1, sel+1); draw(); e.preventDefault(); }
+    else if (e.key === "ArrowUp"){ sel = Math.max(0, sel-1); draw(); e.preventDefault(); }
+    else if (e.key === "Enter"){ pick(hits[sel >= 0 ? sel : 0]); }
+  };
+  document.addEventListener("click", e => { if (!box.contains(e.target)) hide(); });
+})();
+
+// ---- global playback bar ----------------------------------------------
+// Contextual: >=2 years -> steps by YEAR (cumulative reveal, current year lit);
+// exactly 1 year -> steps by MONTH (Mar-Oct), each tick labelled with that month's
+// pyroCb count; a fire's Animate panel takes over -> the bar hides.
+const gbar = document.getElementById("gbar");
+const gplay = document.getElementById("gplay"), gscrub = document.getElementById("gscrub");
+const gticks = document.getElementById("gticks");
+L.DomEvent.disableClickPropagation(gbar); L.DomEvent.disableScrollPropagation(gbar);
+let gMode = "off", gU = 1, gReq = null, gLastTs = 0, gDriving = false;
+let dateFilterDoy = null, _lastFilterDoy = -1;
+const gYears = () => YEARS.slice();               // year-mode ticks = every year
+const gYearAt = u => gYears()[Math.round(u * (gYears().length - 1))] ?? gYears()[0];
+const MONTH_LO = 3, MONTH_HI = 10;
+const gMonthAt = u => MONTH_LO + u * (MONTH_HI + 1 - MONTH_LO);   // 3 .. 11
+
+// Month mode: hide any feature whose day-of-year is after the month cursor.
+// recolour() rebuilds every style from scratch first, then we knock hidden features
+// to zero opacity; doy == null just leaves the fresh styles in place.
+function applyDateFilter(){
+  const doy = dateFilterDoy;
+  if (doy === _lastFilterDoy) return;
+  _lastFilterDoy = doy;
+  recolour();
+  for (const y of Object.keys(cache)){
+    const c = cache[y];
+    const hide = ft => doy != null && !(ft.properties.doy != null && ft.properties.doy <= doy);
+    ["per","bnd","orp"].forEach(k => c[k] && c[k].eachLayer(l => {
+      if (l.setStyle) l.setStyle(hide(l.feature) ? {opacity:0, fillOpacity:0} : {opacity:1});
+    }));
+    ["pcb","pcbC","ign"].forEach(k => c[k] && c[k].eachLayer(l => {
+      const off = hide(l.feature);
+      if (l.setOpacity) l.setOpacity(off ? 0 : 1);
+      else if (l.setStyle) l.setStyle({opacity: off?0:1, fillOpacity: off?0:1});
+    }));
+  }
+}
+
+function gStop(){ if (gReq){ cancelAnimationFrame(gReq); gReq = null; } gLastTs = 0;
+  gplay.innerHTML = "&#9654;"; }
+function gFrame(ts){
+  if (gLastTs){ const per = gMode === "year" ? 1.3 : 0.6;   // seconds per step
+    const steps = gMode === "year" ? gYears().length : (MONTH_HI + 2 - MONTH_LO);
+    gU = (gU + (ts - gLastTs) / (per * steps * 1000));
+    if (gU >= 1){ gU = 1; gLastTs = 0; gRender(); gStop(); return; } }
+  gLastTs = ts; gRender(); gReq = requestAnimationFrame(gFrame);
+}
+function gPlayPause(){
+  if (gReq){ gStop(); return; }
+  gDriving = true;
+  if (gU >= 0.999) gU = 0;
+  gLastTs = 0; gplay.innerHTML = "&#10073;&#10073;"; gReq = requestAnimationFrame(gFrame);
+}
+gplay.onclick = gPlayPause;
+gscrub.oninput = () => { gStop(); gDriving = true; gU = (+gscrub.value)/1000; gRender(); };
+
+let _gRendering = false;
+function gRender(){
+  if (_gRendering) return;               // refresh() -> updateGBar() can re-enter mid-frame
+  _gRendering = true;
+  try { _gRender(); } finally { _gRendering = false; }
+}
+function _gRender(){
+  gscrub.value = Math.round(gU * 1000);
+  const glabel = document.getElementById("glabel"), gsub = document.getElementById("gsub");
+  if (gMode === "year"){
+    let cy;
+    if (gDriving){
+      cy = gYearAt(gU);
+      let changed = false;
+      YEARS.forEach(y => { const want = y <= cy;
+        if (want !== activeYears.has(y)){ want ? activeYears.add(y) : activeYears.delete(y); changed = true; } });
+      if (changed) refresh();
+      glabel.textContent = YEARS[0] + " – " + cy;
+      gsub.textContent = activeYears.size + " years";
+    } else {
+      const on = YEARS.filter(y => activeYears.has(y));
+      cy = on[on.length - 1];
+      glabel.textContent = on.length
+        ? (on[0] === cy ? String(cy) : on[0] + " – " + cy) : "—";
+      gsub.textContent = "play to sweep the decade";
+    }
+    [...gticks.children].forEach(s => s.classList.toggle("hot", +s.dataset.y === cy));
+  } else if (gMode === "month"){
+    const y = [...activeYears][0], mc = MONTH_COUNTS[String(y)] || {};
+    if (!gDriving){
+      glabel.textContent = "whole of " + y;
+      gsub.textContent = "play to reveal month by month";
+      [...gticks.children].forEach(s => s.classList.remove("hot"));
+      return;
+    }
+    const mf = gMonthAt(gU), m = Math.min(MONTH_HI, Math.floor(mf)), done = mf > MONTH_HI + 0.999;
+    dateFilterDoy = done ? null : (MONTH_DOY[m+1] - 1);
+    applyDateFilter();
+    let cum = 0; for (let k = MONTH_LO; k <= m; k++) cum += (mc[k]||0);
+    glabel.textContent = done ? "whole of " + y : MONTH_ABBR[m] + " " + y;
+    gsub.textContent = (done ? (mc[MONTH_LO]!=null ? Object.values(mc).reduce((a,b)=>a+b,0) : cum)
+                             : cum) + " pyroCb by then";
+    [...gticks.children].forEach(s => s.classList.toggle("hot", +s.dataset.m <= m));
+  }
+}
+
+let _gMonthYear = null;
+function updateGBar(){
+  const animating = infoEl.style.display === "block"
+    && !document.getElementById("paneAnim")?.hidden;
+  const mode = animating ? "off"
+             : activeYears.size === 1 ? "month"
+             : activeYears.size >= 2 ? "year" : "off";
+  const monthYear = mode === "month" ? [...activeYears][0] : null;
+  const structural = mode !== gMode || (mode === "month" && monthYear !== _gMonthYear);
+  if (structural){
+    gStop(); gMode = mode; _gMonthYear = monthYear; gDriving = false; gU = 1;
+    dateFilterDoy = null; _lastFilterDoy = -2; applyDateFilter();
+    if (mode === "year"){
+      gticks.innerHTML = YEARS.map(y => `<span data-y="${y}">${String(y).slice(2)}</span>`).join("");
+    } else if (mode === "month"){
+      const mc = MONTH_COUNTS[String(monthYear)] || {};
+      gticks.innerHTML = "";
+      for (let m = MONTH_LO; m <= MONTH_HI; m++){
+        const s = document.createElement("span");
+        s.dataset.m = m;
+        s.textContent = MONTH_ABBR[m] + (mc[m] ? " " + mc[m] : "");
+        gticks.appendChild(s);
+      }
+    }
+  }
+  gbar.style.display = mode === "off" ? "none" : "block";
+  if (mode !== "off") gRender();
+}
+
+refresh().then(updateGBar);
 </script>
 </body>
 </html>
@@ -1385,6 +1760,8 @@ refresh();
 
 HTML = (HTML.replace("__DATA__", DATA_JS).replace("__YEARS__", YEARS_JS)
             .replace("__COLORS__", COLORS_JS).replace("__RAMP__", RAMP_JS)
+            .replace("__SPREADCLAMP__", SPREAD_CLAMP_JS).replace("__MONTHCOUNTS__", MONTH_COUNTS_JS)
+            .replace("__SEARCH__", SEARCH_JS)
             .replace("__DOY0__", str(DOY_RANGE[0])).replace("__DOY1__", str(DOY_RANGE[1]))
             .replace("__ORPHAN__", str(int(C.MATCH_CAP_KM)))
             .replace("__Y0__", str(YEARS[0])).replace("__Y1__", str(YEARS[-1])))

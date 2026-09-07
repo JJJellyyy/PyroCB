@@ -7,7 +7,39 @@ Rationale for each choice lives in [DECISIONS.md](DECISIONS.md); data discoverie
 
 ---
 
-## v0.14 — 2026-09-06 — native-resolution fire activity, canvas renderer, raster land cover
+## v0.15 — 2026-09-07 — animation colour modes, media scrubber, global playback bar, search
+
+### Added
+* **Animation colour modes** (`colour` toggle in the Animate panel):
+  * **burn age** — now a **purple** ramp (old → new). Red/yellow was intuitively misleading
+    because those colours read as fire *intensity*.
+  * **avg spread** / **spread p95** — a red→yellow ramp meaning *speed* (deep red = fast,
+    yellow = slow), from the 12-hourly `avgspread` / `spread95` Snapshot attributes
+    (`pyrocb/spread.py`, cache stage `spread`). Global ramp clamp = p2–p98 of the non-zero
+    values. Disabled for fires with no spread series.
+* **Media-player scrubber.** The fire-animation slider is now a real transport: drag to any
+  moment, pause, study detail. The pyroCb ticks over it are **numbered** (`pcb_index`) and
+  **stagger vertically** when several events fall close together in time.
+* **Custom loop length** already existed (1–120 s); the presets stay 3/5/10/15/20 s.
+* **Global playback bar** (bottom-centre), contextual:
+  * ≥ 2 years shown → steps by **year**, cumulative reveal, current year highlighted.
+  * exactly 1 year → steps by **month** (Mar–Oct); each tick is labelled with that month's
+    pyroCb count, and playing reveals perimeters / ignitions / events month by month
+    (`MONTH_COUNTS`, `applyDateFilter`).
+  * a fire's Animate panel open → the bar hides; that panel's scrubber is the control.
+* **Find-a-fire search** (top-centre): match on our `pcb_id`, the fire name, or the merge id;
+  selecting a result loads that year, flies to the fire and opens its panel. Ships a tiny
+  global index so it works before a year is loaded.
+
+### Changed
+* **All animation / timeline scrubbing snaps to the 12 h VIIRS overpass cadence** (plus the
+  exact pyroCb onset times). NFP is actually overpass-resolution, not 12-hourly, but the
+  honest cadence to expose is the overpass — sub-overpass scrubbing showed motion that isn't
+  in the data.
+
+### Notes
+`spread.py` reads ~1200 Snapshot files per year on a cold cache (~90 s/year, then cached).
+Spread modes apply per cell by binning its first-burn time into the covering 12 h step.
 
 A performance/resolution pass. Everything got **finer and smaller at the same time**, because
 all three hot paths were shipping the wrong representation.

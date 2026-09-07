@@ -139,6 +139,14 @@ def _build_lcpng(year: int, mergids) -> dict:
     return lcraster.fire_overlays(year, sub["mergid"].tolist(), list(sub.geometry))
 
 
+def spread_steps_cached(year: int, mergids) -> dict:
+    """{str(mergid): {t, av, s95}} 12-hourly spread-rate series - see pyrocb/spread.py."""
+    from . import spread as SP
+    mergids = sorted(int(m) for m in mergids)
+    return _json_cached("spread", year, {"mergids": mergids, "v": 2},
+                        _inputs(year), lambda: SP.fire_spread_steps(year, mergids))
+
+
 def _json_cached(stage: str, year: int, params: dict, inputs, builder) -> dict:
     """Cache a plain dict (not a frame) as JSON, keyed like `config.cached`."""
     key = C.params_hash({"p": params, "inputs": C._stamp(inputs), "code": C.CODE_VERSION})
@@ -201,7 +209,8 @@ def firesim_cached(year: int, events: pd.DataFrame, linked) -> dict:
     for m, g in ev.groupby("mergid"):
         onsets[int(m)] = [
             {"t": str(pd.Timestamp(r.datetime)), "lat": float(r.lat),
-             "lon": float(r.lon), "id": str(r.pcb_id)}
+             "lon": float(r.lon), "id": str(r.pcb_id),
+             "ix": int(r.pcb_index) if pd.notna(r.pcb_index) else None}
             for r in g.sort_values("datetime").itertuples()]
     return _json_cached("firesim", year, {"cell": C.BURN_CELL_M, "onsets": onsets},
                         _inputs(year), lambda: FS.fire_series(year, onsets))

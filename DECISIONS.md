@@ -306,7 +306,34 @@ the attribute table and the info-panel top-3 — only the cosmetic map fill is l
 **Deferred to I-3:** a raster/tile render path if the *visual* layer really needs 30 m
 everywhere.
 
+### D-40 — Animation burn-age ramp is purple; spread modes are the red→yellow one
+Red/yellow on active-fire pixels reads as *intensity*. Burn age (old vs new cell) is not
+intensity, so it gets a dark→light **purple** ramp. The red→yellow ramp is reassigned to
+the two *spread-rate* colour modes (`avgspread`, `spread95` from the 12-hourly Snapshot
+attributes), where "hot = fast" is the intended reading. Deep red = fast, yellow = slow.
+**Rejected:** a computed local front-crossing rate per cell — the user pointed out the atlas
+already carries `avgspread` / `spread95` per step; using the published number is both less
+work and defensible.
+
+### D-41 — Every animation scrubber snaps to the 12 h overpass cadence
+NFP `datetime_utc` is real per-overpass time (F6), not 12-hourly, so the raw scrubber let
+you slide between overpasses and *see* motion that is pure interpolation. The cursor now
+snaps to a 12 h grid (∪ the exact pyroCb onset times). This is the "12 h snapshot" the user
+asked for — the honest observation cadence, even though the underlying timestamps are finer.
+
+### D-42 — The global playback bar is contextual, and does not fight the year chips
+One bottom-centre transport that changes meaning with the selection: ≥ 2 years → cumulative
+year sweep; 1 year → month-by-month reveal (Mar–Oct, ticks labelled with pyroCb counts);
+a fire's Animate panel open → the bar hides and that panel's scrubber takes over. It only
+*drives* `activeYears` / the date filter once the user presses play or drags it (`gDriving`);
+until then it just mirrors state, so manual chip selection is never overridden silently.
+**Rejected:** folding the per-fire animation into the global bar — the panel scrubber has
+pyroCb ticks, colour modes and loop options bound to one event; duplicating that in a global
+widget with three unrelated modes would be worse, not better.
+
 ### D-36 — Whole-fire animation is adaptively decimated, tiered on time-to-pyroCb
+NOTE: superseded in v0.14 by the uniform 375 m grid (see CHANGELOG v0.14 / D-39 area).
+Kept for history. Original text:
 Shipping every NFP detection of a big merge complex (10 k+, months long) would bloat the
 map. Instead, per detection, take the minimum time gap to any of the fire's pyroCb onsets:
 ≤ 24 h keeps native footprint + time; ≤ 72 h dedups to a 1 km grid / 6 h bin; beyond that,

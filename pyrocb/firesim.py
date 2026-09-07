@@ -51,6 +51,7 @@ def fire_series(year: int, onsets: dict) -> dict:
             "t0": pd.Timestamp(t0).strftime("%Y-%m-%d %H:%M"),
             "dur_h": round(float(mins.max()) / 60.0, 1),
             "pcb_h": ons_h,
+            "pcb_ix": [o.get("ix") for o in ons],
             "pcb_ll": [[round(float(o["lat"]), 4), round(float(o["lon"]), 4)] for o in ons],
             "pcb_id": [str(o["id"]) for o in ons],
             "g": grid,
