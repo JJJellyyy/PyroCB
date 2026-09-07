@@ -306,6 +306,42 @@ the attribute table and the info-panel top-3 — only the cosmetic map fill is l
 **Deferred to I-3:** a raster/tile render path if the *visual* layer really needs 30 m
 everywhere.
 
+### D-43 — Plot the *fire*, not the reported pyroCb point, when position matters
+93 % of atlas pyroCb coordinates are exact 0.1° multiples (F13) — a ±5.6 km N–S / ±2.8 km
+E–W neighbourhood at 60°N. Rather than pretend otherwise, the map ships both positions:
+the reported point (default, with an optional ±0.1° box) and `fire_lat`/`fire_lon`, the
+centroid of that event's own 6 h-pre-onset active burn, which VIIRS locates to one 375 m
+pixel. `loc_rounded` says which events were snapped.
+**Rejected:** silently re-plotting everything on the fire centroid — the reported location
+is the published record and some events have no pre-onset burn to centre on.
+**Rejected:** interpolating a "better" pyroCb point from the plume geometry — we do not
+have the plume, only the atlas row.
+
+### D-44 — Reduce map geometry with `simplify` only; never a morphological close
+FEDS perimeters are alpha shapes fitted over 375 m pixels, so the *source* is granular at
+375 m. `SIMPLIFY_TOL` 0.003° (~330 m, ~1 pixel — visible when zoomed in) → **0.0003°
+(~33 m)**; `COORD_PRECISION` stays 1e-5° (~1.1 m, ~340× finer than a pixel — 1e-6 only
+bought invisible decimetres at a real cost in bytes).
+Growth bands are **simplify-only at 50 m**, with the ±60 m buffer-close deleted. Douglas–
+Peucker error is *bounded by its tolerance* (measured max 92 m at 60 m); a close is not —
+bands are thin rings, and `buffer(+r).buffer(-r)` annihilates anything narrower than `2r`,
+which measured **4.3 km** of worst-case displacement (F14). Reducing the radius does not
+help; any close jumps the max error to kilometres.
+**Rejected:** shipping unsimplified perimeters — 12.3 MB for 2023 alone, and the extra
+vertices are alpha-shape noise, not real boundary detail.
+**Rejected:** a small (±15–25 m) close to suppress boolean crenellation — measured, and it
+still cost 2.5–3.1 km of max error for no payload saving.
+**Rule going forward:** morphological open/close is valid only on the pixel-lattice
+layers, where fusing disjoint 375 m squares is the point.
+
+### D-45 — Animation mode is explicit, never inferred from the year selection
+Inferring "years vs months" from `activeYears.size` was the year-sweep bug: sweeping back
+to one year flipped the mode, which reset the animation and cleared the year set. The mode
+is now a three-way user choice (Off / Years / Months); turning it off restores the year
+selection that was in place before the sweep started.
+**Rejected:** keeping the inference with guards — every guard added another state to get
+wrong, and the user has to be able to say "animate months" while several years are loaded.
+
 ### D-40 — Animation burn-age ramp is purple; spread modes are the red→yellow one
 Red/yellow on active-fire pixels reads as *intensity*. Burn age (old vs new cell) is not
 intensity, so it gets a dark→light **purple** ramp. The red→yellow ramp is reassigned to

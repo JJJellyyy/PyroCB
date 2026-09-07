@@ -7,6 +7,52 @@ Rationale for each choice lives in [DECISIONS.md](DECISIONS.md); data discoverie
 
 ---
 
+## v0.16 — 2026-09-07 — positional accuracy, country filter, band/perimeter styling
+
+### Added
+* **Country filter.** Toggle Canada / Northern Asia / Alaska. Region is carried on every
+  layer — events, perimeters, ignitions, growth bands and the snapshot bands — by
+  inheriting each fire's region from the pyroCb matched to it.
+* **Outline-only** toggles for growth bands *and* fire perimeters (border, no fill).
+* **Growth bands from the 12 h snapshot** as an alternative to split-at-pyroCb. Rendered
+  straight off the existing 375 m burn grid, coloured by day-of-year — no new payload,
+  and finer than the polygon bands.
+* **pyroCb position: "as reported" vs "matched fire"**, plus an optional ±0.1° report
+  uncertainty box. See Accuracy below.
+
+### Accuracy (the headline)
+* **Reported pyroCb coordinates are 0.1°-rounded for ~93 % of events** — ±5.6 km N–S,
+  ±2.8 km E–W at 60°N (FINDINGS **F13**). That is unrecoverable from the source. So the
+  map now also ships `fire_lat`/`fire_lon`: the centroid of each event's own 6 h-pre-onset
+  active burn, which is located to **one 375 m VIIRS pixel**, and can plot events there
+  instead. `loc_rounded` flags which events were snapped.
+* **Perimeter simplification 0.003° → 0.0003°** (~330 m → ~33 m) and the coordinate snap
+  1e-5° → 1e-6° (~1.1 m → ~0.11 m). FEDS perimeters are alpha shapes over 375 m pixels,
+  so ~33 m is an order of magnitude below the source's own granularity — visually lossless,
+  where 330 m was plainly visible zoomed in.
+* **Growth bands: the ±60 m buffer-close removed** (simplify-only at 50 m). This turned
+  out to be the *largest* positional error in the map, far bigger than the perimeter
+  issue we set out to fix: bands are thin rings, and a `buffer(+r).buffer(-r)` close
+  deletes anything narrower than `2r`. Measured worst-case displacement was **4.3 km**
+  (v0.15), versus **92 m** for simplify-only at the same payload scale. Shrinking the
+  close radius does not help — any close jumps the max error to kilometres. See F14.
+
+### Fixed
+* **Year sweep deselected / failed to select years.** The playback mode was *inferred*
+  from how many years were active, so sweeping back to a single year flipped the mode to
+  "months" mid-play, resetting the animation and clearing the year set. Mode is now an
+  explicit choice (Off / Years / Months) and never changes itself.
+* **The playback bar is out of the middle of the map** — it is an "Animate" section in the
+  control panel under the year chips, as requested.
+* **Month tick labels no longer read as dates.** The slider used to sit over them; ticks
+  are now above the track, with the count on its own muted sub-line (`Jun` / `40`) so it
+  can't be misread as "Jun 40".
+* **Month "pyroCb by then" follows the country toggles.**
+* **Whole-fire animation tick labels crowd less**: greedy row packing (first row with
+  space) instead of round-robin, with the stem drawn to the right length.
+
+---
+
 ## v0.15 — 2026-09-07 — animation colour modes, media scrubber, global playback bar, search
 
 ### Added

@@ -270,3 +270,73 @@ Result across the matched set: **~48 % of in-window pixels dropped**; headline a
 median 92 → **31 km²**, max 15,000+ → **1,280 km²**. `detach_km > 0` for 65 % of events
 (rounding puts the point just off a pixel; snap is usually < 1 km), `> 5 km` for only 27 —
 those are the genuinely weak localisations and are flagged.
+
+---
+
+## F13. The atlas pyroCb coordinate is a neighbourhood, not a point — and the fire is not
+
+Measured over all 484 events in `PCBAtlas.xlsx`:
+
+| | share |
+|---|---|
+| `lat` an exact multiple of 0.1° | **92.6 %** |
+| `lon` an exact multiple of 0.1° | **93.4 %** |
+| both rounded (`loc_rounded`) | ~93 % |
+
+Only ~7 % of events carry a second decimal. So for most events the plotted pyroCb dot
+carries **±0.05° of quantisation — about 5.6 km N–S, and 2.8 km E–W at 60°N** (half-cell),
+i.e. a worst-case displacement near 11 km / 5 km. No processing can recover that; it is
+how the source was recorded.
+
+**The matched fire is three orders of magnitude better.** VIIRS active-fire detections
+are located to one 375 m pixel, so the centroid of an event's own 6 h-pre-onset active
+burn (`active_area_km2_pre6_post0`) is a genuinely accurate position for *the fire that
+made the plume*. The map now ships both (`fire_lat` / `fire_lon` beside the reported
+point) and can plot either, with the ±0.1° report box drawable on demand.
+
+**Consequence for analysis:** never compute a distance, a land-cover sample or a
+terrain covariate from the reported pyroCb lat/lon. Use the matched fire geometry.
+`match_dist_km` is measured against the rounded point and so inherits the same floor —
+which is exactly why anything above ~5 km was already flagged provisional.
+
+### Map-side geometry fidelity
+
+Separately, the *map* was simplifying perimeters at 0.003° (~330 m), which is about one
+VIIRS pixel and plainly visible when zoomed into a fire. FEDS perimeters are alpha
+shapes fitted over 375 m pixels, so the source itself has ~375 m granularity: simplifying
+an order of magnitude below that is visually lossless and anything finer just stores
+alpha-shape noise. Now 0.0003° (~33 m) with a 1e-6° (~0.11 m) coordinate snap, and the
+growth bands lost the ±60 m buffer-close that was rounding real concave detail off them.
+
+---
+
+## F14. Buffer open/close destroys thin geometry — never use it to "tidy" growth bands
+
+Growth bands are **thin rings** (the area burned between two successive cumulative
+unions). A `buffer(+r).buffer(-r)` close annihilates any feature narrower than `2r` and
+merges anything separated by less than `2r`, so on rings it does not smooth — it deletes.
+
+Measured on 2023's 183 bands, deviation from the unsmoothed geometry (Hausdorff, metres):
+
+| band map treatment | payload | max dev | median dev |
+|---|---|---|---|
+| close ±60 m + simplify 150 m *(shipped through v0.15)* | 1.53 MB | **4304 m** | 150 m |
+| close ±25 m + simplify 25 m | 3.39 MB | **2487 m** | 25 m |
+| close ±15 m + simplify 20 m | 3.60 MB | **3051 m** | 20 m |
+| **simplify 25 m, no close** | 3.36 MB | **42 m** | 25 m |
+| **simplify 60 m, no close** | 2.24 MB | **92 m** | 60 m |
+
+Note the pattern: adding *any* close jumps the maximum error to kilometres while barely
+changing the payload, and shrinking the close radius does not help. Douglas–Peucker
+simplification, by contrast, is **bounded by its tolerance** — 60 m of tolerance gives
+92 m of worst-case error.
+
+**So the band layer is simplify-only at `BAND_SIMPLIFY_M`, and the close is gone.** The
+±60 m close had been inherited from the old active-burn *pixel lattice* layer, where
+closing a grid of disjoint 375 m squares into a blob was the entire point. It was never
+appropriate for bands, and it had been silently displacing their boundaries by up to
+4.3 km — a far larger error than the 330 m perimeter simplification we set out to fix.
+
+**General rule for this project:** morphological open/close is only ever valid on the
+pixel-lattice layers. Everywhere else, reduce vertices with `simplify`, whose error is
+bounded and reportable.

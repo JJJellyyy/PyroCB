@@ -48,12 +48,24 @@ WGS84 = 4326
 PRECISION_M      = 1.0    # snap grid before every boolean; 1/375 of a VIIRS pixel
 SLIVER_KM2       = 0.02   # drop polygon parts below this
 MIN_BAND_KM2     = 0.5    # ~3.5 VIIRS pixels; below this a band keeps its row, loses geometry
-BAND_SIMPLIFY_M  = 50.0   # band simplification for the map payload (in METRIC_CRS)
+BAND_SIMPLIFY_M  = 50.0   # band simplification for the map payload (in METRIC_CRS).
+                          # SIMPLIFY ONLY - never a buffer open/close. Douglas-Peucker
+                          # deviation is BOUNDED by the tolerance (measured: max 92 m at
+                          # 60 m); a +/-60 m close displaced band boundaries by up to
+                          # 4.3 km, because bands are thin rings and an open/close
+                          # annihilates anything narrower than 2x the radius (F14).
 PIXEL_AREA_KM2   = 0.141  # exact area FEDS assigns a single VIIRS detection
 
-# Background layers (the ~200k perimeters and ignitions) - much coarser, see notebook.
-SIMPLIFY_TOL    = 0.003   # degrees (~330 m, ~1 VIIRS pixel)
-COORD_PRECISION = 1e-5    # degrees (~1 m)
+# Map payload geometry fidelity. FEDS perimeters are alpha shapes fitted over 375 m
+# VIIRS pixels, so the SOURCE has ~375 m granularity; simplifying an order of magnitude
+# below that is visually lossless against the real data, and anything finer is just
+# storing alpha-shape noise. 0.003 deg (~330 m) used to be the tolerance and was
+# plainly visible when zoomed into a fire.
+SIMPLIFY_TOL    = 0.0003  # degrees (~33 m, ~1/11 of a VIIRS pixel)
+COORD_PRECISION = 1e-5    # degrees (~1.1 m) - ~340x finer than a VIIRS pixel and
+                          # well under the simplify tolerance, so the snap never
+                          # dominates the error budget. 1e-6 only bought decimetres
+                          # nothing can see, at a real cost in bytes.
 
 # ---------------------------------------------------------------- matching / bands
 MATCH_CAP_KM        = 20.0
