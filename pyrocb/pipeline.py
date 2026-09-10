@@ -6,6 +6,7 @@ None (all years) reuses 2023 untouched and only computes the rest.
 from __future__ import annotations
 
 import glob
+import hashlib
 import json
 import os
 
@@ -20,6 +21,7 @@ from . import firesim as FS
 from . import io
 from . import landcover as LC
 from . import matching as M
+from . import nearby as N
 from . import variables as V
 
 
@@ -94,6 +96,25 @@ def _denorm(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def nearby_geom_cached(year: int, radii_km=None, methods=None) -> "gpd.GeoDataFrame":
+    """Cached matched-fire v2 polygons: one row per (pcb_id, radius_km, method),
+    geometry = the clipped active-fire area that (radius, method) combination's
+    centroid was taken from.
+
+    Independent of `match_cached`/mergid - see pyrocb/nearby.py - so it is keyed on
+    its own params and runs over every pyroCb event, matched or not. Call
+    `nearby.summarise()` on the result for the wide per-event
+    `fire2_r{R}_{method}_*` columns.
+    """
+    radii = tuple(sorted(radii_km or C.NEARBY_RADII_KM))
+    methods = tuple(methods or C.NEARBY_METHODS)
+    # v2 = centroid/geometry come from NFP detections, not the cumulative snapshot hull.
+    params = {"radii_km": list(radii), "methods": list(methods), "crs": C.METRIC_CRS,
+              "prec": C.PRECISION_M, "src": "nfp", "max_steps": C.NEARBY_MAX_STEPS, "v": 4}
+    return C.cached("nearbygeom", year, params, _inputs(year),
+                    lambda: N.nearby_polygons(year, radii, methods), geo=True)
+
+
 def active_cached(year: int, events: pd.DataFrame):
     params = {"win": [list(w) for w in C.ACTIVE_TABLE_WINDOWS], "cap": C.MATCH_CAP_KM,
               "prec": C.PRECISION_M, "bridge": C.ACTIVE_BRIDGE_M,
@@ -126,8 +147,8 @@ def lcpng_cached(year: int, mergids) -> dict:
     rather than parquet.
     """
     mergids = sorted(int(m) for m in mergids)
-    params = {"buf": C.LC_BUFFER_M, "min_m": C.LC_PNG_MIN_M, "cap": C.LC_PNG_CAP_PX,
-              "split": C.LC_YEAR_SPLIT, "mergids": mergids}
+    params = {"buf": C.LC_BUFFER_M, "cell_m": C.LC_PNG_CELL_M, "cap": C.LC_PNG_CAP_PX,
+              "split": C.LC_YEAR_SPLIT, "mergids": mergids, "v": 2}
     return _json_cached("lcpng", year, params, [LC._tif(year)],
                         lambda: _build_lcpng(year, mergids))
 
@@ -139,11 +160,87 @@ def _build_lcpng(year: int, mergids) -> dict:
     return lcraster.fire_overlays(year, sub["mergid"].tolist(), list(sub.geometry))
 
 
+def satellite_cached(year: int, mergids) -> dict:
+    """{str(mergid): meta} post-fire Sentinel-2 true-colour image around each merged
+    perimeter - see pyrocb/satellite.py. The images themselves are JPEG files under
+    `C.SAT_IMG_DIR`; this caches only the small metadata dict (file path, date,
+    cloud %, coverage, n_scenes).
+
+    Scoped to `C.SAT_YEARS` (None -> every year): returns {} immediately for a year
+    outside that set. This is the one stage that makes LIVE network calls (STAC
+    search + windowed COG reads) rather than reading local files.
+    """
+    if C.SAT_YEARS is not None and year not in C.SAT_YEARS:
+        return {}
+    mergids = sorted(int(m) for m in mergids)
+    params = {"mergids": mergids, "radius_margin": C.SAT_RADIUS_MARGIN,
+              "radius_min_km": C.SAT_RADIUS_MIN_KM, "out_px": C.SAT_OUT_PX,
+              "max_tiles": C.SAT_MAX_TILES, "max_cloud": C.SAT_MAX_CLOUD,
+              "post_d": list(C.SAT_POST_WINDOW_D), "jpeg_q": C.SAT_JPEG_QUALITY}
+    return _json_cached("satellite", year, params, [C.PERIMS_TPL.format(y=year)],
+                        lambda: _build_satellite(year, mergids))
+
+
+def _build_satellite(year: int, mergids) -> dict:
+    from . import satellite as SAT
+    return SAT.fire_images(year, mergids, C.SAT_IMG_DIR.format(y=year))
+
+
+def goes_cloud_cached(year: int, events: pd.DataFrame) -> dict:
+    """{pcb_id: meta} pyroCb cloud imagery (GOES visible, earliest daylight scene
+    GOES_POST_WINDOW_H after onset), centred on the as-reported point with every v2
+    (radius, method) position marked on it, plus the v3 radius-ladder match (green
+    star) and v4 4-overpass time-weighted match (purple star) if present - see
+    pyrocb/goes_cloud.py D-69/D-70/D-78. `events` must be that year's rows with
+    pcb_id/datetime/lat/lon/region, every `fire2_r{R}_{M}_lat/lon` column, and
+    optional `v3_lat`/`v3_lon`/`v4_lat`/`v4_lon` (missing ones just skip that
+    marker). Runs every year; goes_cloud.py itself returns {} fast for years/regions
+    it cannot cover (GOES_MIN_YEAR, GOES_EXCLUDE_REGIONS), same as satellite_cached's
+    year gate.
+    """
+    fire2_cols = [c for c in events.columns if c.startswith("fire2_") and (c.endswith("_lat") or c.endswith("_lon"))]
+    star_cols = [c for c in ("v3_lat", "v3_lon", "v4_lat", "v4_lon") if c in events.columns]
+    cols = [c for c in ("pcb_id", "datetime", "lat", "lon", "region") if c in events.columns] + fire2_cols + star_cols
+    ev = events[cols].copy()
+    params = {"ids": sorted(ev["pcb_id"].tolist()), "radius_km": C.GOES_RADIUS_KM,
+              "out_px": C.GOES_OUT_PX, "post_window_h": list(C.GOES_POST_WINDOW_H),
+              "daylight_h": list(C.GOES_DAYLIGHT_LOCAL_H), "min_refl": C.GOES_MIN_DAYLIGHT_REFL,
+              "jpeg_q": C.GOES_JPEG_QUALITY, "min_year": C.GOES_MIN_YEAR,
+              "excl": list(C.GOES_EXCLUDE_REGIONS),
+              "radii": list(C.NEARBY_RADII_KM), "methods": list(C.NEARBY_METHODS),
+              "starsig": _star_signature(ev, star_cols), "v": 6}
+    return _json_cached("goescloud", year, params, [C.XLSX_FP],
+                        lambda: _build_goes(year, ev))
+
+
+def _star_signature(ev: pd.DataFrame, star_cols: list) -> str | None:
+    """Fingerprint of the v3/v4 marker POSITIONS, so the image cache tracks them.
+
+    `has_v3: bool` was not enough on its own (D-74): the star is burned into the
+    JPEG, so when a position moves every cached image is stale while a boolean
+    presence flag is unchanged. Hashing the coordinates makes any future move of
+    either version invalidate the imagery by itself, instead of relying on someone
+    remembering to bump `v`. Covers v3 and v4 together (one hash, not two) since
+    either changing means every image with that star needs to be redrawn.
+    """
+    if not star_cols:
+        return None
+    vals = ev[sorted(star_cols)].round(6).fillna(-999.0)
+    return hashlib.md5(
+        pd.util.hash_pandas_object(vals, index=False).values.tobytes()).hexdigest()[:16]
+
+
+def _build_goes(year: int, ev: pd.DataFrame) -> dict:
+    from . import goes_cloud as G
+    return G.event_images(year, ev, C.GOES_IMG_DIR.format(y=year))
+
+
 def spread_steps_cached(year: int, mergids) -> dict:
-    """{str(mergid): {t, av, s95}} 12-hourly spread-rate series - see pyrocb/spread.py."""
+    """{str(mergid): {t, av, s95, frp, frp95}} 12-hourly step-attribute series - see
+    pyrocb/spread.py. v3 added frp/frp95 to the payload schema."""
     from . import spread as SP
     mergids = sorted(int(m) for m in mergids)
-    return _json_cached("spread", year, {"mergids": mergids, "v": 2},
+    return _json_cached("spread", year, {"mergids": mergids, "v": 3},
                         _inputs(year), lambda: SP.fire_spread_steps(year, mergids))
 
 
@@ -184,14 +281,15 @@ def landcover_fractions_cached(year: int, active_gdf, events: pd.DataFrame) -> p
             sub = pd.concat([sub, fb[["pcb_id", "geometry"]]], ignore_index=True)
     sub = gpd.GeoDataFrame(sub, geometry="geometry", crs=C.METRIC_CRS)
     ids = sorted(sub["pcb_id"].tolist())
+    n_top = 5   # D-80: top 5 classes for the info-panel landcover breakdown (was 3)
     params = {"win": [pre, post], "ids": ids, "split": C.LC_YEAR_SPLIT,
-              "fallback": ["first", C.LC_BLOWUP_SPAN_H]}
+              "fallback": ["first", C.LC_BLOWUP_SPAN_H], "n_top": n_top}
 
     def build():
         if not len(sub):
             return pd.DataFrame(columns=["pcb_id", "lc_n_px"])
         g = sub.to_crs(3979)
-        return LC.active_fractions(year, g["pcb_id"].tolist(), list(g.geometry))
+        return LC.active_fractions(year, g["pcb_id"].tolist(), list(g.geometry), n_top=n_top)
 
     return C.cached("lcfrac", year, params, [LC._tif(year)], build)
 
@@ -200,7 +298,8 @@ def firesim_cached(year: int, events: pd.DataFrame, linked) -> dict:
     """{str(mergid): whole-fire evolution payload} for the year's pyroCb fires.
 
     Returns a plain dict (not a frame), so it uses a small JSON cache keyed on the
-    firesim params, the pyroCb onsets and the NFP file stamps.
+    firesim params, the pyroCb onsets and the NFP file stamps. v2 added ign_h/ign_ix/
+    ign_ll (D-60) to the payload schema.
     """
     linked = {int(m) for m in linked}
     ev = events[(events["year"] == year) & events["mergid"].notna()].copy()
@@ -212,7 +311,7 @@ def firesim_cached(year: int, events: pd.DataFrame, linked) -> dict:
              "lon": float(r.lon), "id": str(r.pcb_id),
              "ix": int(r.pcb_index) if pd.notna(r.pcb_index) else None}
             for r in g.sort_values("datetime").itertuples()]
-    return _json_cached("firesim", year, {"cell": C.BURN_CELL_M, "onsets": onsets},
+    return _json_cached("firesim", year, {"cell": C.BURN_CELL_M, "onsets": onsets, "v": 2},
                         _inputs(year), lambda: FS.fire_series(year, onsets))
 
 
@@ -227,6 +326,11 @@ def run_year(year: int, verbose: bool = True):
     s = A.summarise(act)
     if len(s):
         ev = ev.merge(s, on="pcb_id", how="left")
+    # fold matched-fire v2 (nearby-snapshot centroids, all radii) onto the event rows too
+    nbg = nearby_geom_cached(year)
+    nb = N.summarise(nbg)
+    if len(nb):
+        ev = ev.merge(nb, on="pcb_id", how="left")
     return m, g, ev, act
 
 
@@ -289,7 +393,7 @@ DICT = [
     ("snap_n_components", "-", "Snapshot rows sharing this mergid (un-executed merge components)", "snapshot"),
     ("active_area_km2_pre12_post12", "km2", "ACTIVE BURN AREA: union of VIIRS pixel footprints from 12 h before to 12 h after onset, localised to the pyroCb's own fire cluster. The sampling geometry for land cover / ERA5", "NFP"),
     ("active_area_km2_pre{A}_post{B}", "km2", "Same for other windows: pre6_post6, pre24_post24, pre0_post24 (pure post, for blow-ups), pre24_post0, pre6_post0 (the 6 h-before-onset burn, sampled for land cover)", "NFP"),
-    ("lc_top{1,2,3}_cls / _frac", "- / frac", "Top 3 Land Cover of Canada classes and their fraction of the pre6_post0 active-burn polygon, at native 30 m; lc_n_px = 30 m cells sampled", "Land Cover of Canada 2015/2020"),
+    ("lc_top{1..5}_cls / _frac", "- / frac", "Top 5 Land Cover of Canada classes and their fraction of the pre6_post0 active-burn polygon, at native 30 m; lc_n_px = 30 m cells sampled", "Land Cover of Canada 2015/2020"),
     ("active_n_pixels_pre12_post12", "-", "Detections in the localised window", "NFP"),
     ("active_n_obs_pre12_post12", "-", "Distinct overpass times in the window; 1 means a single look", "NFP"),
     ("active_n_before_onset_pre12_post12", "-", "Of those detections, how many precede onset (0 => blow-up, see active_is_blowup)", "NFP"),
@@ -303,6 +407,13 @@ DICT = [
     ("lat / lon", "deg", "APPROXIMATE FIRE location (not the plume), stored to 0.1 deg ~ 11 km", "PCBAtlas.xlsx"),
     ("max_inject_alt", "m", "Maximum smoke injection altitude", "PCBAtlas.xlsx"),
     ("trop_relative_alt", "m", "Injection altitude minus MERRA-2 tropopause; negative = below", "PCBAtlas.xlsx"),
+    ("fire2_r{R}_{M}_lat / _lon", "deg", "MATCHED FIRE V2 at radius R km and strategy M (R in NEARBY_RADII_KM e.g. r10/r15/r20; M in NEARBY_METHODS - closest/before/before_after/before2_after2, see pyrocb/nearby.py for what each picks): UNWEIGHTED mean of the centres of every NFP detection within R km of the reported point, at the overpass(es) M selects. Identity-free - ignores mergid entirely. NaN if nothing was detected within range", "derived (pyrocb/nearby.py)"),
+    ("fire2_r{R}_{M}_step", "-", "Overpass step(s) used, comma-separated if M pooled more than one", "derived"),
+    ("fire2_r{R}_{M}_dt_h", "h", "Hours from onset to the nominally-closest used step's NOMINAL time; negative = before onset, positive = after", "derived"),
+    ("fire2_r{R}_{M}_det_dt_h", "h", "Median hours from onset to the REAL detection times behind the v2 position - the honest staleness of the sample", "derived"),
+    ("fire2_r{R}_{M}_area_km2", "km2", "Area of the union of those detections' VIIRS pixel footprints", "derived"),
+    ("fire2_r{R}_{M}_n_pixels", "-", "NFP detections within radius R across the step(s) M used", "derived"),
+    ("fire2_r{R}_{M}_n_fires", "-", "Distinct mergid fires among those detections (>1 means two fires were burning within R km of each other)", "derived"),
 ]
 
 

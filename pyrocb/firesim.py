@@ -29,6 +29,8 @@ def fire_series(year: int, onsets: dict) -> dict:
     """
     nfp = io.read_nfp_year(year)
     by = {k: v for k, v in nfp.groupby("mergid")}
+    ign = io.read_ignitions(year)
+    ign_by = {k: v for k, v in ign.groupby("mergid")}
     out = {}
 
     for mergid, ons in onsets.items():
@@ -47,6 +49,23 @@ def fire_series(year: int, onsets: dict) -> dict:
         ons = sorted(ons, key=lambda o: pd.Timestamp(o["t"]))
         ons_h = [round(float((np.datetime64(pd.Timestamp(o["t"])) - t0)
                              / np.timedelta64(1, "m")) / 60.0, 2) for o in ons]
+
+        # Every ignition of the merge complex, timed the same way as the pyroCb
+        # onsets (hours relative to this fire's own t0) so the animate panel can
+        # place both on one shared timeline. A merge complex can have several
+        # separately-ignited fronts (D-4/README); `ign_index` is already their
+        # chronological order within it.
+        gi = ign_by.get(int(mergid))
+        if gi is not None and len(gi):
+            gi = gi.sort_values("ign_index")
+            ign_h = [round(float((np.datetime64(pd.Timestamp(t_)) - t0) / np.timedelta64(1, "m")) / 60.0, 2)
+                    for t_ in gi["ign_t"]]
+            ign_ll = [[round(float(p.y), 4), round(float(p.x), 4)]
+                     for p in gi.geometry.representative_point().to_crs(C.WGS84)]
+            ign_ix = [int(x) for x in gi["ign_index"]]
+        else:
+            ign_h, ign_ll, ign_ix = [], [], []
+
         out[str(int(mergid))] = {
             "t0": pd.Timestamp(t0).strftime("%Y-%m-%d %H:%M"),
             "dur_h": round(float(mins.max()) / 60.0, 1),
@@ -54,6 +73,7 @@ def fire_series(year: int, onsets: dict) -> dict:
             "pcb_ix": [o.get("ix") for o in ons],
             "pcb_ll": [[round(float(o["lat"]), 4), round(float(o["lon"]), 4)] for o in ons],
             "pcb_id": [str(o["id"]) for o in ons],
+            "ign_h": ign_h, "ign_ll": ign_ll, "ign_ix": ign_ix,
             "g": grid,
             "n_raw": int(len(g)),
             "n_cell": burngrid.n_cells(grid),

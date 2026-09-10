@@ -38,7 +38,7 @@ snap_meanFRP	W/m2	Area-normalised mean FRP at match_step	snapshot
 snap_n_components	-	Snapshot rows sharing this mergid (un-executed merge components)	snapshot
 active_area_km2_pre12_post12	km2	ACTIVE BURN AREA: union of VIIRS pixel footprints from 12 h before to 12 h after onset, localised to the pyroCb's own fire cluster. The sampling geometry for land cover / ERA5	NFP
 active_area_km2_pre{A}_post{B}	km2	Same for other windows: pre6_post6, pre24_post24, pre0_post24 (pure post, for blow-ups), pre24_post0, pre6_post0 (the 6 h-before-onset burn, sampled for land cover)	NFP
-lc_top{1,2,3}_cls / _frac	- / frac	Top 3 Land Cover of Canada classes and their fraction of the pre6_post0 active-burn polygon, at native 30 m; lc_n_px = 30 m cells sampled	Land Cover of Canada 2015/2020
+lc_top{1..5}_cls / _frac	- / frac	Top 5 Land Cover of Canada classes and their fraction of the pre6_post0 active-burn polygon, at native 30 m; lc_n_px = 30 m cells sampled	Land Cover of Canada 2015/2020
 active_n_pixels_pre12_post12	-	Detections in the localised window	NFP
 active_n_obs_pre12_post12	-	Distinct overpass times in the window; 1 means a single look	NFP
 active_n_before_onset_pre12_post12	-	Of those detections, how many precede onset (0 => blow-up, see active_is_blowup)	NFP
@@ -52,3 +52,10 @@ fire_lcc_final	-	Dominant land cover of the final perimeter	final perimeter
 lat / lon	deg	APPROXIMATE FIRE location (not the plume), stored to 0.1 deg ~ 11 km	PCBAtlas.xlsx
 max_inject_alt	m	Maximum smoke injection altitude	PCBAtlas.xlsx
 trop_relative_alt	m	Injection altitude minus MERRA-2 tropopause; negative = below	PCBAtlas.xlsx
+fire2_r{R}_{M}_lat / _lon	deg	MATCHED FIRE V2 at radius R km and strategy M (R in NEARBY_RADII_KM e.g. r10/r15/r20; M in NEARBY_METHODS - closest/before/before_after/before2_after2, see pyrocb/nearby.py for what each picks): UNWEIGHTED mean of the centres of every NFP detection within R km of the reported point, at the overpass(es) M selects. Identity-free - ignores mergid entirely. NaN if nothing was detected within range	derived (pyrocb/nearby.py)
+fire2_r{R}_{M}_step	-	Overpass step(s) used, comma-separated if M pooled more than one	derived
+fire2_r{R}_{M}_dt_h	h	Hours from onset to the nominally-closest used step's NOMINAL time; negative = before onset, positive = after	derived
+fire2_r{R}_{M}_det_dt_h	h	Median hours from onset to the REAL detection times behind the v2 position - the honest staleness of the sample	derived
+fire2_r{R}_{M}_area_km2	km2	Area of the union of those detections' VIIRS pixel footprints	derived
+fire2_r{R}_{M}_n_pixels	-	NFP detections within radius R across the step(s) M used	derived
+fire2_r{R}_{M}_n_fires	-	Distinct mergid fires among those detections (>1 means two fires were burning within R km of each other)	derived

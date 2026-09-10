@@ -73,6 +73,48 @@ MATCH_CAP_SENSITIVITY = (10.0, 20.0, 30.0)
 MAX_BACKWALK_STEPS  = 30      # 15 days
 MATCH_FORWARD_STEPS = 2       # look this many overpasses AHEAD for a fire that blew up
                               # before it was first observed (the nightly ~10 h gap)
+
+# "Matched fire v2" (pyrocb/nearby.py): a second, deliberately simple pyroCb-position
+# estimate that ignores fire identity (mergid) entirely - just "what was actively
+# burning within this radius of the report, right around this time". See that module
+# for the full method. Kept separate from MATCH_CAP_KM: that cap governs the
+# containment/nearest-fire mergid match, this radius governs a totally different,
+# identity-free localisation.
+# Computed at every radius in this tuple. Was (3.0, 5.0, 10.0) with 3/5 km dropped for
+# being dominated by the atlas's own +/-5.6 km position error rather than anything the
+# method could fix (D-55). 15/20 km added back on request (D-66) for side-by-side
+# comparison against 10 km, now that NEARBY_METHODS also varies which snapshot(s)
+# each radius is measured against - a wider radius may behave differently under
+# "before2_after2" than it did alone.
+NEARBY_RADII_KM      = (10.0, 15.0, 20.0)
+# How many overpasses to try, nearest-in-time first, before giving up on an event.
+# A step only has to have detected fire SOMEWHERE to be "available", and VIIRS swaths
+# do not cover every location on every pass, so the closest overpass in time can be a
+# regional blank. Measured 2013-2023 (under "closest"): trying the 2nd-closest
+# recovers 17 of 111 otherwise-missing events and the 3rd recovers 1 more; the 4th
+# through 6th recover nothing, so 3 is where the returns stop. Also the step budget
+# "before2_after2" (D-66) draws its 2+2 overpasses from, so it cannot be lowered
+# below 2 without breaking that method.
+NEARBY_MAX_STEPS     = 3
+# D-66: four different answers to "which overpass(es) count as 'nearby in time'?",
+# shipped side by side (pyrocb/nearby.py has the full reasoning for each) so a
+# reviewer can compare them directly rather than the pipeline committing to one.
+#   "closest"          nearest overpass, before OR after onset - no causal claim.
+#   "before"           nearest AT-OR-BEFORE onset; falls through to AFTER-onset
+#                      overpasses only once every before-onset option is exhausted
+#                      (i.e. for a blow-up fire, structurally - not a separate flag).
+#   "before_after"     nearest before AND nearest after, pooled into one search.
+#   "before2_after2"   nearest TWO before AND nearest TWO after, pooled.
+NEARBY_METHODS       = ("closest", "before", "before_after", "before2_after2")
+# Map-only smoothing (D-67) for the nb2 "active fire used for centering" polygons:
+# close_m bridges gaps between separate VIIRS pixel rectangles into solid blobs
+# before simp_m simplifies them - plain simplify() alone barely helps a shape that
+# IS hundreds of disjoint small rectangles. Needed once before2_after2 (up to 4
+# pooled overpasses) and 15/20 km radii made these median 1000+ vertices each, x12
+# (radius, method) combos. Map-display geometry only; area_km2/n_pixels in the
+# attribute table come from the un-smoothed polygon in pyrocb/nearby.py.
+NB2_CLOSE_M          = 200.0
+NB2_SIMPLIFY_M       = 30.0
 NFP_WINDOWS_H       = (6, 12, 24)
 # Active-burn polygon: NFP pixel footprints within +/- W hours of onset. Symmetric,
 # because the ~10 h nightly blind window means the run that fed the plume is usually
@@ -86,6 +128,12 @@ ACTIVE_MIN_SPAN_H  = 6
 ACTIVE_WINDOWS     = tuple((a, b) for a in ACTIVE_STEPS_H for b in ACTIVE_STEPS_H
                            if a + b >= ACTIVE_MIN_SPAN_H)      # 24 combinations
 ACTIVE_HEADLINE    = (12, 12)
+# THE ANALYSIS POLYGON. The active-burn window the covariates for the pyroCb model
+# (ERA5 temperature/humidity/wind, terrain slope, fire intensity, land cover ...) are
+# sampled over, and the window the map's "Analysis polygon" layer opens on. It is a
+# window of ACTIVE_WINDOWS, so the map can step to any other one client-side without
+# new data - this constant only sets the default and the documented choice.
+ANALYSIS_WINDOW    = ACTIVE_HEADLINE
 # Windows also written as columns in the attribute table: the headline gets the full
 # set of metrics, the rest just area + pixel count.
 # (6, 0) is the "burn area in the 6 h before onset" polygon - the geometry the
@@ -112,11 +160,15 @@ LC_CELL_M     = 1000.0
 LC_BUFFER_M   = 5000.0
 LC_SIMPLIFY_M = 2000.0
 # Near the fires land cover is a paletted PNG overlay per fire (pyrocb/lcraster.py),
-# not polygons: ~120 m everywhere for ~1.9 MB over 2023's 69 fires (the 1 km polygon
-# tier it replaces was 1.1 MB), and one GPU-composited <img> per fire instead of
-# thousands of canvas paths. LC_PNG_MIN_M is the ground-resolution floor, LC_PNG_CAP_PX
-# the per-side pixel cap that keeps a continent-sized fire from producing a huge image.
-LC_PNG_MIN_M  = 120.0
+# not polygons: one GPU-composited <img> per fire instead of thousands of canvas
+# paths. LC_PNG_CELL_M is deliberately == BURN_CELL_M (375 m, below) and the grid is
+# snapped to the same Mercator-origin convention burngrid.py uses (D-64), so a
+# land-cover cell and a fire-activity cell at the same fire share exact edges instead
+# of merely overlapping - keep the two constants equal if either one changes.
+# LC_PNG_CAP_PX is the per-side pixel cap that keeps a continent-sized fire from
+# producing a huge image (widens the cell size for that fire only, never the grid's
+# alignment - the widened cell still snaps to the same Mercator-origin grid).
+LC_PNG_CELL_M = 375.0
 LC_PNG_CAP_PX = 640
 # Coarse background land cover: away from the fires the map still shows land cover
 # rather than OpenStreetMap, but decimated hard so the browser copes. Drawn under
@@ -131,10 +183,85 @@ LC_ACTIVE_WINDOW = (6, 0)
 # Fall back to the first this-many hours of detected burning that IS available.
 LC_BLOWUP_SPAN_H = 6.0
 
+# ---------------------------------------------------------------- satellite imagery
+# Post-fire Sentinel-2 true-colour image per fire (pyrocb/satellite.py). Each image is
+# a LIVE network fetch (STAC search + windowed COG reads via Microsoft's Planetary
+# Computer), unlike everything else in the pipeline. None -> every resolved year
+# (matches the YEARS/SNAPSHOT_YEARS None-means-all convention); set to a tuple (e.g.
+# (2023,)) to scope it down again for a faster rebuild while iterating.
+# Pre-fire images were dropped (D-59): post alone, at every year, was worth more than
+# both phases at one year, and the pair cost roughly the same to fetch either way.
+# () -> off for every year (D-65): a deliberate, one-line, fully reversible switch -
+# already-built images and cache stay on disk untouched, satellite_cached's own year
+# gate (`year not in C.SAT_YEARS`) is unconditionally true for an empty tuple, and
+# nothing else in the pipeline or the map needs to change to bring it back. Set back
+# to None (every year) or a specific tuple to re-enable.
+SAT_YEARS: tuple[int, ...] = ()
+# The circle drawn "around the whole perimeter": centroid to farthest boundary point,
+# times this margin, floored at SAT_RADIUS_MIN_KM so small fires keep visible context.
+# Radius varies 2-160 km across 2023's matched fires (D-51), so SAT_OUT_PX - not a
+# fixed ground resolution - is what keeps the output image a sane, uniform size.
+SAT_RADIUS_MARGIN = 1.25
+SAT_RADIUS_MIN_KM = 5.0
+SAT_OUT_PX         = 1024
+# How many scenes to mosaic per image, closest-date-first, before giving up on
+# filling the circle. A small fire's circle fits in one tile and stops immediately
+# (the mosaic loop exits as soon as `filled` is 100%); this cap only matters for the
+# handful of huge complexes whose circle spans many Sentinel-2 tiles - a 320 km-wide
+# circle needs on the order of 15-20 100 km tiles, not a handful.
+SAT_MAX_TILES      = 20
+SAT_MAX_CLOUD      = 40.0     # scene-level eo:cloud_cover ceiling for a candidate
+# Search window in days after the fire's own ted_* (official end): offset forward so
+# the scene shows dead ground, not still-active fire/smoke. Candidates are ranked by
+# closeness to that anchor date, not by cloud cover (D-52) - so a narrower window
+# matters less here than it would under pure cloud-minimisation.
+SAT_POST_WINDOW_D  = (10, 75)
+# Delivery (D-53): images are JPEG files on disk, not embedded in fire_pcb_map.html -
+# at 1024 px true-colour even a circle-cropped PNG is 1-2 MB, and ~70 fires x 2 phases
+# would multiply the map's size 10x. SAT_IMG_DIR is relative to ROOT so the map's
+# <img src> stays a same-directory relative path wherever the output is copied.
+SAT_IMG_DIR        = str(ROOT / "sat_images" / "{y}")
+SAT_JPEG_QUALITY   = 82
+
+# -------------------------------------------------------- pyroCb cloud imagery (GOES)
+# A snapshot of the actual pyroCb - not the fire - at the moment it happened, from
+# GOES-16/17/18/19 visible imagery (pyrocb/goes_cloud.py). Two hard coverage limits,
+# both physical, not configurable: GOES only sees the Western Hemisphere, and was not
+# operational before Dec 2017. ~252 of 484 events are within reach.
+GOES_MIN_YEAR          = 2018
+GOES_EXCLUDE_REGIONS   = ("Northern Asia",)   # no geostationary coverage on Planetary Computer
+# The circle radius. D-69: centred on the AS-REPORTED point (not v2 - that's what's
+# being evaluated, so it can't also be the reference frame), widened from 30 to 60 km
+# so every (radius, method) v2 position - up to 20 km from the report - sits well
+# inside with room to compare against the actual cloud, rather than at the edge.
+GOES_RADIUS_KM         = 60.0
+GOES_OUT_PX            = 512
+# Search window: earliest DAYLIGHT scene at least GOES_POST_WINDOW_H[0] after onset
+# (the pyroCb needs time to develop into a mature, visible cloud) and at most [1]
+# after (still the same event, not a later day's unrelated weather).
+GOES_POST_WINDOW_H     = (0.0, 12.0)
+# Hard cap on candidate-scene READ attempts per event (D-85/D-86 lineage): starting the
+# search window at onset (0 h) means a dusk/night onset can walk through many darkening
+# candidates before GOES_DAYLIGHT_LOCAL_H/GOES_MIN_DAYLIGHT_REFL reject them, each a real
+# network fetch. This bounds the worst-case cost per event without changing which scene
+# wins when one is found well inside the cap.
+GOES_MAX_READ_ATTEMPTS = 10
+# Local-solar-hour band treated as "daylight enough" for a visible-band read, before
+# ever fetching a scene - generous, because boreal summer days are long at these
+# latitudes. GOES_MIN_DAYLIGHT_REFL is the post-read sanity floor (median reflectance
+# of valid pixels) that catches the dawn/dusk edge this coarse hour band lets through.
+GOES_DAYLIGHT_LOCAL_H  = (5.0, 21.0)
+GOES_MIN_DAYLIGHT_REFL = 0.05
+GOES_JPEG_QUALITY      = 82
+GOES_IMG_DIR           = str(ROOT / "cloud_images" / "{y}")
+
 # ---------------------------------------------------------------- fire-activity grid
 # Both animation layers (the +/-24 h window and the whole-fire event) ship as a
 # delta-coded, time-sorted grid of burned cells at ONE ground resolution - see
 # pyrocb/burngrid.py. 375 m is a single VIIRS pixel, i.e. native.
+# LC_PNG_CELL_M (above) is kept equal to this on purpose (D-64) - the land-cover PNG
+# overlay grid and this fire-activity grid share the same Mercator-origin snapping,
+# so their cells tile against each other exactly rather than merely overlapping.
 #
 # This replaced a tiered decimation that inflated each kept detection to its dedup
 # cell, so the quiet spans between pyroCb onsets were drawn as 3 km blocks - blocks

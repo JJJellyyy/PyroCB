@@ -65,7 +65,7 @@ import pandas as pd
 
 import pyrocb
 from pyrocb import (config as C, io, timebins as T, matching, bands, active,
-                    variables, pipeline, landcover, firesim)
+                    variables, pipeline, landcover, firesim, nearby)
 
 pd.set_option("display.max_columns", 60)
 pd.set_option("display.width", 200)
@@ -96,6 +96,38 @@ print(f"map years        : {YEARS}")
 print(f"analysis years   : {SNAP_YRS}   (set C.SNAPSHOT_YEARS = None for all)")
 print(f"match cap        : {C.MATCH_CAP_KM} km | sliver {C.SLIVER_KM2} km2 | snap grid {C.PRECISION_M} m")
 pd.crosstab(pcb_all.year, pcb_all.region, margins=True)
+""")
+
+md(r"""
+### Matched fire v3 (PCB_MATCHING_CLEAN.ipynb)
+
+A third, independent position per event: `PCB_MATCHING_CLEAN.ipynb`'s radius-ladder match
+(DECISIONS.md D-70) — closest-in-time Snapshot fire within 10-20 km, escalating radius,
+capping the 2nd time-candidate at +/-12 h. Read here as a finished run artefact
+(`pcb_matching_clean.gpkg`), not recomputed — that notebook is the single source of truth
+for its own algorithm; this map only visualises the result.
+""")
+code(r"""
+import geopandas as gpd
+# Layer "pcb_active_burn": geometry is the matched snapshot CLIPPED to the search
+# buffer, i.e. the burn around this pyroCb - not the whole fire. That matters here:
+# a FEDS snapshot polygon is cumulative season-to-date area, so plotting the whole
+# footprint put the v3 marker up to 150 km from its own event on big complexes
+# (2023-G90288). The file's other layer, "matched_fire_full", keeps the whole fire.
+v3_gdf = gpd.read_file(C.ROOT / "pcb_matching_clean.gpkg", layer="pcb_active_burn",
+                       columns=["pcb_id", "match_status", "mergid", "search_radius_km",
+                               "match_dt_h", "match_dist_km", "v3_lat", "v3_lon",
+                               "v3_pos_source", "active_area_km2", "active_n_pixels",
+                               "active_det_dt_h", "clip_area_km2", "n_fires_in_buffer",
+                               "v4_lat", "v4_lon", "v4_area_km2", "v4_n_pixels",
+                               "v4_n_steps_used", "v4_det_dt_h", "geometry"])
+# v4's own analysis window lives in its own layer (same rows, different geometry).
+v4_gdf = gpd.read_file(C.ROOT / "pcb_matching_clean.gpkg", layer="pcb_active_burn_v4",
+                       columns=["pcb_id", "mergid", "v4_area_km2", "v4_n_pixels",
+                               "v4_n_steps_used", "v4_det_dt_h", "v4_steps",
+                               "search_radius_km", "geometry"])
+v3_gdf = v3_gdf[v3_gdf["match_status"] == "matched"].copy()
+print(f"matched fire v3: {len(v3_gdf)}/{len(pcb_all)} events")
 """)
 
 md(r"""
@@ -171,7 +203,7 @@ an overpass whose bulk clearly precedes onset. `obs_lag_h` records how stale the
 pre-band is.
 """)
 code(r"""
-band_geom, band_ev, active_geom = {}, {}, {}
+band_geom, band_ev, active_geom, nearby_geom = {}, {}, {}, {}
 for y in SNAP_YRS:
     band_geom[y], band_ev[y] = pipeline.bands_cached(y, matches[y])
 bd = pd.concat(band_geom.values(), ignore_index=True) if band_geom else None
@@ -226,12 +258,47 @@ for y in SNAP_YRS:
     lf = pipeline.landcover_fractions_cached(y, active_geom[y], e)
     if len(lf) and lf.shape[1] > 1:
         e = e.merge(lf, on="pcb_id", how="left")
+    # Matched fire v2 (pyrocb/nearby.py): identity-free nearby-detection centroids, at
+    # EVERY (radius, method) combination in NEARBY_RADII_KM x NEARBY_METHODS -
+    # independent of the mergid matching above, see DECISIONS.md D-49/D-66. Keep the
+    # polygons too (nearby_geom[y]): the map draws them as "active fire used for
+    # centering".
+    nearby_geom[y] = pipeline.nearby_geom_cached(y)
+    nb = nearby.summarise(nearby_geom[y])
+    if len(nb):
+        e = e.merge(nb, on="pcb_id", how="left")
     _ev.append(e)
 events = pd.concat(_ev, ignore_index=True)
 active_all = pd.concat([active_geom[y] for y in SNAP_YRS if len(active_geom[y])],
                        ignore_index=True)
+
+# Matched fire v3 (PCB_MATCHING_CLEAN.ipynb, D-70): fold its position + provenance
+# onto the event rows by pcb_id, same join pattern as v2's fire2_* merge above.
+# v3_lat/lon is the representative point of the matched active-burn geometry
+# (never its plain centroid - that can land outside a concave/multi-part polygon,
+# see D-49's identical concern for the old v2 hull centroid).
+if len(v3_gdf):
+    _v3 = v3_gdf.rename(columns={"mergid": "v3_mergid", "search_radius_km": "v3_search_radius_km",
+                                 "match_dt_h": "v3_dt_h", "match_dist_km": "v3_match_dist_km",
+                                 "active_area_km2": "v3_burn_km2",
+                                 "active_n_pixels": "v3_n_px",
+                                 "active_det_dt_h": "v3_det_dt_h",
+                                 "clip_area_km2": "v3_cum_km2",
+                                 "n_fires_in_buffer": "v3_n_fires"})
+    # v3_lat/lon come STRAIGHT from the notebook - the pixel-weighted centre it
+    # actually endorses. This map used to derive its own position here
+    # (representative_point of the polygon), which is how it plotted points the
+    # notebook never computed: unweighted, on the whole-fire footprint, up to 150 km
+    # from the event. One source of truth, no second derivation.
+    _v3 = _v3.drop(columns=["match_status", "geometry"])
+    events = events.merge(_v3, on="pcb_id", how="left")
 print(f"{len(events)} events x {events.shape[1]} columns")
 print(f"dedup_collapsed rows: {int(events.dedup_collapsed.fillna(False).sum())}")
+print(f"matched fire v3: {int(events['v3_lat'].notna().sum()) if 'v3_lat' in events else 0}/{len(events)}")
+for _m in C.NEARBY_METHODS:
+    print(f"matched fire v2 ({_m}): " + ", ".join(
+        f"{_r:g}km {int(events[f'fire2_{nearby._key(_r,_m)}_lat'].notna().sum())}/{len(events)}"
+        for _r in C.NEARBY_RADII_KM))
 events[["pcb_id", "fire_name", "mergid", "pcb_index", "n_pcb_total", "n_pcb_before", "n_pcb_after",
         "n_ign_total", "n_ign_before", "n_ign_after", "area_pre_km2", "area_post_km2",
         "frac_burned_before", "obs_lag_h"]].head(12)
@@ -360,19 +427,13 @@ for y in YEARS:
 
     # POSITION ACCURACY. The atlas stores lat/lon to 0.1 deg for 93% of events - about
     # 11 km of latitude, 5 km of longitude at 60N - so the plotted pyroCb dot is only
-    # ever a neighbourhood. The matched fire, on the other hand, is known to one VIIRS
-    # pixel. Ship BOTH: `loc_*` is the reported point, `fire_*` the centroid of the
-    # 6 h-pre-onset active burn, and `loc_rounded` says whether the report was snapped.
-    ag_y = active_geom.get(y)
-    if ag_y is not None and len(ag_y):
-        lo_, hi_ = C.LC_ACTIVE_WINDOW
-        cen = ag_y[(ag_y.pre_h == lo_) & (ag_y.post_h == hi_)].copy()
-        cen = cen[~cen.geometry.is_empty & cen.geometry.notna()]
-        if len(cen):
-            c4326 = gpd.GeoSeries(cen.geometry.values, crs=C.METRIC_CRS).centroid.to_crs(C.WGS84)
-            cmap = dict(zip(cen["pcb_id"], zip(c4326.y.round(5), c4326.x.round(5))))
-            pg["fire_lat"] = pg["pcb_id"].map(lambda k: (cmap.get(k) or (None, None))[0])
-            pg["fire_lon"] = pg["pcb_id"].map(lambda k: (cmap.get(k) or (None, None))[1])
+    # ever a neighbourhood. Ship both: `loc_*` is the reported point, `fire2_*` the
+    # identity-free nearby-detection mean (matched fire v2, from pyrocb/nearby.py,
+    # already joined onto `p`/`ev` by pipeline.run_year), and `loc_rounded` says
+    # whether the report was snapped. (A mergid-based "matched fire v1" - the centroid
+    # of the pyroCb's own 6 h pre-onset active burn - used to ship here too; dropped
+    # from the map for being redundant with v2 once v2 moved to real NFP detections,
+    # see DECISIONS.md.)
     # Coordinate precision per event, as the grid cell in degrees. The atlas nominal
     # precision is 0.1 deg; a few 2013-2016 events carry a second decimal (0.01 deg).
     # Whole-number coordinates are treated as 0.1 deg, not 1 deg - they are almost
@@ -388,7 +449,24 @@ for y in YEARS:
     pg["loc_prec"] = [round(max(_prec(a), _prec(b)), 4) for a, b in zip(p["lat"], p["lon"])]
     pg["loc_rounded"] = [pr >= 0.1 for pr in pg["loc_prec"]]
 
-    pg = pg[[c for c in ("pcb_id", "datetime", "doy", "fire_name", "region", "status",
+    # The 4 real overpass slots around each event's own onset, on the fixed AM/PM
+    # schedule - same anchor convention as nearby.py's "before" method (D-66), so the
+    # map's "snap to snapshot" active-burn slider (below) and v2 matching always mean
+    # the same overpass by "1st before" for the same event.
+    _snaps = [T.snapshot_offsets_h(t, lon) for t, lon in zip(p["datetime"], p["lon"])]
+    pg["snap_b1_h"] = [round(s[0], 2) for s in _snaps]
+    pg["snap_b2_h"] = [round(s[1], 2) for s in _snaps]
+    pg["snap_a1_h"] = [round(s[2], 2) for s in _snaps]
+    pg["snap_a2_h"] = [round(s[3], 2) for s in _snaps]
+
+    # fire2_r{R}_{M}_* for every (radius, method) combination - built from
+    # C.NEARBY_RADII_KM x C.NEARBY_METHODS rather than hardcoded, so adding either
+    # is the only change needed anywhere.
+    _fire2_cols = tuple(f"fire2_{nearby._key(_r, _m)}_{_c}"
+                        for _r in C.NEARBY_RADII_KM for _m in C.NEARBY_METHODS
+                        for _c in ("lat", "lon", "step", "dt_h", "det_dt_h",
+                                   "area_km2", "n_pixels", "n_fires"))
+    pg = pg[[c for c in (("pcb_id", "datetime", "doy", "fire_name", "region", "status",
                          "max_inject_alt", "trop_relative_alt", "pcb_min_bt", "mergid",
                          "match_method", "match_dist_km", "pcb_index", "n_pcb_total",
                          "n_pcb_before", "n_pcb_after", "n_ign_total", "area_pre_km2",
@@ -398,9 +476,16 @@ for y in YEARS:
                          "active_n_after_onset_pre12_post12", "active_frp_p95_pre12_post12",
                          "active_detach_km_pre12_post12", "active_is_blowup", "agrid",
                          "lc_top1_cls", "lc_top1_frac", "lc_top2_cls", "lc_top2_frac",
-                         "lc_top3_cls", "lc_top3_frac", "lc_n_px",
-                         "fire_lat", "fire_lon", "loc_rounded", "loc_prec",
-                         "geometry")
+                         "lc_top3_cls", "lc_top3_frac", "lc_top4_cls", "lc_top4_frac",
+                         "lc_top5_cls", "lc_top5_frac", "lc_n_px",
+                         "loc_rounded", "loc_prec",
+                         "snap_b1_h", "snap_b2_h", "snap_a1_h", "snap_a2_h",
+                         "v3_mergid", "v3_lat", "v3_lon", "v3_search_radius_km",
+                         "v3_dt_h", "v3_match_dist_km", "v3_burn_km2", "v3_n_fires",
+                         "v3_n_px", "v3_det_dt_h", "v3_cum_km2", "v3_pos_source",
+                         "v4_lat", "v4_lon", "v4_area_km2", "v4_n_pixels",
+                         "v4_n_steps_used", "v4_det_dt_h")
+                        + _fire2_cols + ("geometry",))
                 if c in pg.columns]]
 
     # Fires credited with a pyroCb, for the "only fires with a pyroCb" filter.
@@ -448,6 +533,66 @@ for y in YEARS:
     else:
         b64["bnd"], _, _ = pack({"type": "FeatureCollection", "features": []})
 
+    # Matched-fire-v2 geometry (pyrocb/nearby.py): the union of the VIIRS pixel
+    # footprints whose centres the v2 position is the mean of - what the map draws as
+    # "active fire used for centering". Used to ship un-smoothed (radius-capped, so
+    # "small enough") - that assumption broke once D-66 added before2_after2 (up to 4
+    # pooled overpasses) and 15/20 km: median 1264 vertices per polygon at 20 km,
+    # some over 5000, x12 (radius, method) combos instead of 1 -> ~88 MB raw for 2023
+    # alone. Plain simplify() cannot fix this - the shape is hundreds of disjoint
+    # small rectangles, not a curve with redundant vertices to remove - so this closes
+    # gaps between nearby detections into solid blobs first (smooth_for_map, same
+    # treatment the other pixel-lattice layers already get), THEN simplifies those.
+    # area_km2/n_pixels in the data are computed from the un-smoothed geometry in
+    # pyrocb/nearby.py, so only the drawn shape is affected, never the reported numbers.
+    ng = nearby_geom.get(y)
+    ng = ng[~ng.geometry.is_empty & ng.geometry.notna()].copy() if ng is not None and len(ng) else None
+    if ng is not None and len(ng):
+        ng["geometry"] = smooth_for_map(gpd.GeoSeries(ng.geometry.values, crs=C.METRIC_CRS),
+                                        C.NB2_CLOSE_M, C.NB2_SIMPLIFY_M).values
+        ng = ng[~ng.geometry.is_empty & ng.geometry.notna()]
+    if ng is not None and len(ng):
+        ng = gpd.GeoDataFrame(ng, geometry="geometry", crs=C.METRIC_CRS).to_crs(C.WGS84)
+        ng["geometry"] = shapely.set_precision(ng.geometry.values, C.COORD_PRECISION)
+        _nb2cols = ["pcb_id", "radius_km", "method", "step", "dt_h", "det_dt_h", "lat", "lon",
+                    "area_km2", "n_pixels", "n_fires", "mergids", "geometry"]
+        b64["nb2"], _, gnb2 = pack(json.loads(ng[_nb2cols].to_json(drop_id=True)))
+    else:
+        b64["nb2"], _, gnb2 = pack({"type": "FeatureCollection", "features": []})
+
+    # Matched-fire-v3 geometry: the matched Snapshot fire's own polygon (already one
+    # solid alpha shape, not a scattered pixel lattice like v2's nearby detections),
+    # so plain simplify is enough - no morphological close needed, unlike ng above.
+    v3g = v3_gdf[v3_gdf["pcb_id"].isin(p["pcb_id"])].copy() if len(v3_gdf) else None
+    v3g = v3g[~v3g.geometry.is_empty & v3g.geometry.notna()] if v3g is not None and len(v3g) else None
+    if v3g is not None and len(v3g):
+        v3g["geometry"] = v3g.geometry.simplify(C.NB2_SIMPLIFY_M, preserve_topology=True)
+        v3g = v3g[~v3g.geometry.is_empty & v3g.geometry.notna()]
+    if v3g is not None and len(v3g):
+        v3g = gpd.GeoDataFrame(v3g, geometry="geometry", crs=C.METRIC_CRS).to_crs(C.WGS84)
+        v3g["geometry"] = shapely.set_precision(v3g.geometry.values, C.COORD_PRECISION)
+        _nb3cols = ["pcb_id", "mergid", "search_radius_km", "match_dt_h", "match_dist_km",
+                    "active_area_km2", "active_n_pixels", "active_det_dt_h",
+                    "clip_area_km2", "n_fires_in_buffer", "geometry"]
+        b64["nb3"], _, gnb3 = pack(json.loads(v3g[_nb3cols].to_json(drop_id=True)))
+    else:
+        b64["nb3"], _, gnb3 = pack({"type": "FeatureCollection", "features": []})
+
+    # v4: same treatment, its own layer.
+    v4g = v4_gdf[v4_gdf["pcb_id"].isin(p["pcb_id"])].copy() if len(v4_gdf) else None
+    v4g = v4g[~v4g.geometry.is_empty & v4g.geometry.notna()] if v4g is not None and len(v4g) else None
+    if v4g is not None and len(v4g):
+        v4g["geometry"] = v4g.geometry.simplify(C.NB2_SIMPLIFY_M, preserve_topology=True)
+        v4g = v4g[~v4g.geometry.is_empty & v4g.geometry.notna()]
+    if v4g is not None and len(v4g):
+        v4g = gpd.GeoDataFrame(v4g, geometry="geometry", crs=C.METRIC_CRS).to_crs(C.WGS84)
+        v4g["geometry"] = shapely.set_precision(v4g.geometry.values, C.COORD_PRECISION)
+        _nb4cols = ["pcb_id", "mergid", "v4_area_km2", "v4_n_pixels", "v4_n_steps_used",
+                    "v4_det_dt_h", "v4_steps", "search_radius_km", "geometry"]
+        b64["nb4"], _, gnb4 = pack(json.loads(v4g[_nb4cols].to_json(drop_id=True)))
+    else:
+        b64["nb4"], _, gnb4 = pack({"type": "FeatureCollection", "features": []})
+
     # +/-24 h cell grids (localised, 375 m, delta-coded) -> the slider / animation.
     b64["pix"], _, gpx = pack(px)
 
@@ -481,22 +626,40 @@ for y in YEARS:
     spread_by_year[str(y)] = spr
     b64["spr"], _, gspr = pack(spr)
 
+    # Post-fire Sentinel-2 imagery, one JPEG file per fire (not embedded - see
+    # pyrocb/satellite.py D-53/D-59). Scoped to C.SAT_YEARS (None = every year).
+    sat = pipeline.satellite_cached(y, linked) if linked else {}
+    b64["sat"], _, gsat = pack(sat)
+
+    # PyroCb cloud imagery: a GOES visible snapshot at the moment of each event, not
+    # the fire (pyrocb/goes_cloud.py). Per pcb_id, not per mergid - runs every year,
+    # returns {} fast for years/regions GOES structurally cannot cover.
+    goes = pipeline.goes_cloud_cached(y, p) if len(p) else {}
+    b64["goes"], _, ggoes = pack(goes)
+
     payloads[y] = b64
     _nsim = sum(v["n_cell"] for v in sim.values())
     _npix = sum(len(v["di"]) for v in px.values())
     print(f"  {y}: {len(per_out):>6} perims  {len(ign_out):>6} ign  {len(pg):>3} pyroCb"
           f"  {0 if bg is None else len(bg):>3} bands"
           f" | pix {_npix:>7} cells {gpx/1e6:4.2f}MB"
+          f" | nb2 {gnb2/1e6:4.2f}MB"
+          f" | nb3 {gnb3/1e6:4.2f}MB"
+          f" | nb4 {gnb4/1e6:4.2f}MB"
           f" | sim {len(sim):>3} fires {_nsim:>7} cells {gsim/1e6:4.2f}MB"
           f" | spr {gspr/1e6:4.2f}MB"
-          f" | lc {glc/1e6:4.2f}MB poly + {gpng/1e6:4.2f}MB png({len(lcpng)})",
+          f" | lc {glc/1e6:4.2f}MB poly + {gpng/1e6:4.2f}MB png({len(lcpng)})"
+          f" | sat {len(sat):>3} fires {gsat/1e3:5.1f}KB meta"
+          f" | goes {len(goes):>3} events {ggoes/1e3:5.1f}KB meta",
           flush=True)
 
 from pyrocb import spread as _SP
 SPREAD_CLAMP = _SP.clamp(spread_by_year)
-print(f"\nspread ramp clamp (p2..p98 non-zero): "
+print(f"\nspread/FRP ramp clamp (p2..p98 non-zero): "
       f"avgspread {SPREAD_CLAMP['av'][0]:.0f}..{SPREAD_CLAMP['av'][1]:.0f} m/12h, "
-      f"spread95 {SPREAD_CLAMP['s95'][0]:.0f}..{SPREAD_CLAMP['s95'][1]:.0f} m/12h")
+      f"spread95 {SPREAD_CLAMP['s95'][0]:.0f}..{SPREAD_CLAMP['s95'][1]:.0f} m/12h, "
+      f"FRP mean {SPREAD_CLAMP['frp'][0]:.0f}..{SPREAD_CLAMP['frp'][1]:.0f} W/m2, "
+      f"FRP p95 {SPREAD_CLAMP['frp95'][0]:.0f}..{SPREAD_CLAMP['frp95'][1]:.0f} MW")
 
 # Fit the DOY window to the whole dataset, weighted by BURNED AREA. Weighting matters:
 # an unweighted percentile over fire counts is dragged to (16, 349) by tiny January crop
@@ -535,13 +698,21 @@ YEARS_JS  = json.dumps(YEARS)
 COLORS_JS = json.dumps({str(y): C.YEAR_COLORS[y] for y in YEARS})
 RAMP_JS   = json.dumps(C.DOY_RAMP)
 SPREAD_CLAMP_JS = json.dumps(SPREAD_CLAMP)
+NEARBY_RADII_JS = json.dumps(list(C.NEARBY_RADII_KM))
+NEARBY_METHODS_JS = json.dumps(list(C.NEARBY_METHODS))
+NEARBY_METHOD_LABEL_JS = json.dumps({
+    "closest": "Closest overpass", "before": "Before onset",
+    "before_after": "Before + after", "before2_after2": "2 before + 2 after"})
 
 # Month-by-month pyroCb counts per (year, region), so the animate panel's month ticks
 # and its running total follow whichever countries are toggled on.
+# D-79: months widened 3-10 -> 1-12. The old boreal-only range silently dropped
+# every Southern-Hemisphere fire (Australia's season runs Nov-Feb) from the
+# Animate panel's per-month counts once the inventory went global.
 _mc = (pcb_all.assign(m=pcb_all.datetime.dt.month)
        .groupby(["year", "region", "m"]).size())
 MONTH_COUNTS_JS = json.dumps({
-    str(y): {r: {int(m): int(_mc.get((y, r, m), 0)) for m in range(3, 11)}
+    str(y): {r: {int(m): int(_mc.get((y, r, m), 0)) for m in range(1, 13)}
              for r in sorted(pcb_all.region.dropna().unique())}
     for y in YEARS})
 REGIONS_JS = json.dumps(sorted(pcb_all.region.dropna().unique().tolist()))
@@ -687,7 +858,7 @@ HTML = """<!DOCTYPE html>
   #info .player{display:flex;align-items:center;gap:8px;margin:6px 0 1px}
   #info #cur{font-weight:700;white-space:nowrap}
   #info #curabs{color:#666;font-size:11px;white-space:nowrap}
-  #info #scrubwrap{position:relative;margin:7px 0 4px;padding-top:16px}
+  #info #scrubwrap{position:relative;margin:7px 0 4px;padding-top:16px;padding-bottom:11px}
   #info #scrub{width:100%;margin:0;display:block;position:relative;z-index:1}
   #info #ticks{position:absolute;left:0;right:0;top:0;pointer-events:none}
   #info #ticks b{position:absolute;top:0;width:14px;height:14px;margin-left:-7px;
@@ -697,6 +868,16 @@ HTML = """<!DOCTYPE html>
   #info #ticks b.staggered::after{content:"";position:absolute;left:6px;top:13px;width:1px;
      background:rgba(125,17,40,.45);height:var(--stem,13px)}
   #info #ticks b:hover{background:#e11;z-index:3;transform:scale(1.25)}
+  /* Ignitions below the scrubber, deliberately separate from the pyroCb row above it
+     so the two never get mistaken for one another - amber dots, unlabelled (there can
+     be dozens on one merge complex), full detail on hover/click. */
+  #info #igticks{position:absolute;left:0;right:0;bottom:0;pointer-events:none}
+  #info #igticks b{position:absolute;bottom:0;width:9px;height:9px;margin-left:-5px;
+     background:#c9a227;border:1px solid #fff;border-radius:50%;cursor:pointer;
+     pointer-events:auto;box-shadow:0 0 2px rgba(0,0,0,.5)}
+  #info #igticks b.staggered::after{content:"";position:absolute;left:3.5px;bottom:9px;width:1px;
+     background:rgba(201,162,39,.55);height:var(--stem,11px)}
+  #info #igticks b:hover{background:#e2b70a;z-index:3;transform:scale(1.4)}
   #info #loopCustom{width:46px;margin-left:6px;font:11px system-ui;padding:2px 4px;
      border:1px solid #bbb;border-radius:4px}
   @keyframes pcbpulse{0%{transform:scale(.3);opacity:.9}100%{transform:scale(3.4);opacity:0}}
@@ -715,6 +896,9 @@ HTML = """<!DOCTYPE html>
 const DATA=__DATA__, YEARS=__YEARS__, YCOL=__COLORS__, RAMP=__RAMP__;
 const DOY0=__DOY0__, DOY1=__DOY1__, ORPHAN_KM=__ORPHAN__;
 const SPREAD_CLAMP=__SPREADCLAMP__, MONTH_COUNTS=__MONTHCOUNTS__, SEARCH=__SEARCH__;
+const NEARBY_RADII=__NEARBYRADII__;   // km, e.g. [10,15,20] - matched-fire-v2 radius options
+const NEARBY_METHODS=__NEARBYMETHODS__;             // e.g. ["closest","before",...] - which overpass(es), see pyrocb/nearby.py
+const NEARBY_METHOD_LABEL=__NEARBYMETHODLABEL__;    // method key -> UI label
 const REGIONS=__REGIONS__;
 const MONTH_ABBR=["","Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 // day-of-year for the 1st of a given month (non-leap; fires are Mar-Oct so leap day is moot)
@@ -742,10 +926,22 @@ function hideNotice(){ noticeEl.style.display = "none"; }
 // the pyroCb), keyed by the globally unique pcb_id so a click works no matter which
 // years are toggled on. Each entry: {o:[lat,lon], dlat:[], dlon:[], hw:[], hh:[], t:[]}.
 const byPcbPix = {};
-// mergid -> whole-fire series {t0, dur_h, pcb_h, pcb_ix, pcb_ll, pcb_id, g, n_raw, n_cell}.
+// mergid -> whole-fire series {t0, dur_h, pcb_h/ix/ll/id, ign_h/ix/ll, g, n_raw, n_cell}.
+// ign_h are ignitions of the merge complex, hours from t0 - same clock as pcb_h, drawn
+// below the scrubber (drawIgnTicks) instead of above it (drawTicks) so the two never
+// get mistaken for one another.
 const byFireSim = {};
-// mergid -> 12-hourly spread series {t:[iso], av:[m/12h], s95:[m/12h]}, decoded lazily.
+// mergid -> 12-hourly step-attribute series {t:[iso], av, s95 [m/12h], frp [W/m2],
+// frp95 [MW]}, decoded lazily.
 const bySpread = {};
+// mergid -> {file, date, cloud, coverage, n_scenes} - post-fire only, see
+// pyrocb/satellite.py. `file` is a path relative to fire_pcb_map.html itself, loaded
+// lazily as a plain <img src> only when a viewer opens that fire's info panel.
+const bySat = {};
+// pcb_id -> {file, date, dt_h, coverage} - GOES cloud snapshot 2-12 h after the
+// pyroCb's own onset (D-61/D-62), see pyrocb/goes_cloud.py. Keyed by event, not fire:
+// unlike bySat this is about the specific moment, not the fire as a whole.
+const byGoes = {};
 const _spDec = new WeakMap();
 function decodeSpread(s){
   if (!s || !s.t || !s.t.length) return null;
@@ -753,7 +949,7 @@ function decodeSpread(s){
   if (d) return d;
   const n = s.t.length, ms = new Float64Array(n);
   for (let k = 0; k < n; k++) ms[k] = Date.parse(s.t[k] + "Z");
-  d = {n, ms, av:s.av, s95:s.s95};
+  d = {n, ms, av:s.av, s95:s.s95, frp:s.frp, frp95:s.frp95};
   _spDec.set(s, d);
   return d;
 }
@@ -765,6 +961,11 @@ function decodeSpread(s){
 // canvas can draw the newly-revealed slice on top of what is already there instead of
 // rebuilding thousands of Leaflet paths sixty times a second.
 const R_MERC = 6378137.0, MERC_K = 1/(2*Math.PI*R_MERC);
+// lat/lon -> the same EPSG:3857 metres the burn grid is stored in (burngrid.py).
+function toMercator(lat, lon){
+  return [lon * Math.PI/180 * R_MERC,
+         Math.log(Math.tan(Math.PI/4 + lat*Math.PI/360)) * R_MERC];
+}
 const _decoded = new WeakMap();
 function decodeGrid(p){
   if (!p) return null;
@@ -786,9 +987,10 @@ function ubound(t, n, v){ let lo=0, hi=n; while(lo<hi){const m=(lo+hi)>>1; if(t[
 function lbound(t, n, v){ let lo=0, hi=n; while(lo<hi){const m=(lo+hi)>>1; if(t[m]< v) lo=m+1; else hi=m;} return lo; }
 
 // Animation colour modes. "age" is a PURPLE ramp (old -> new) on purpose: red/yellow
-// reads as fire *intensity*, which this is not. "av"/"s95" DO use a red->yellow ramp,
-// there deliberately meaning speed - deep red = fast spread, yellow = slow - from the
-// 12-hourly avgspread / spread95 snapshot attributes.
+// reads as fire *intensity*, which this is not. Every other mode DOES use the same
+// red->yellow ramp, deliberately meaning intensity: "av"/"s95" (spread rate, m/12h) -
+// deep red = fast, yellow = slow; "frp"/"frp95" (radiative power) - deep red = hot,
+// yellow = weak. All four come from the 12-hourly Snapshot attributes.
 const AGE_STOPS    = ["#2c0b52","#43217a","#5c34a6","#7a51c7","#9c78dd","#c1a6ec","#ecdcfb"];
 const SPREAD_STOPS = ["#ffe98a","#ffcf5c","#ffab33","#ff7a1f","#f24a12","#c81e0c","#7d0000"];
 function _bandArray(stops, n){
@@ -801,8 +1003,12 @@ function _bandArray(stops, n){
   return out;
 }
 const AGE_BANDS = _bandArray(AGE_STOPS, 20), SPREAD_BANDS = _bandArray(SPREAD_STOPS, 20);
-let BURN_COLOR_MODE = "age";           // "age" | "av" | "s95"
-const BURN_MODE_LABEL = {age:"burn age", av:"avg spread", s95:"spread p95"};
+let BURN_COLOR_MODE = "age";           // "age" | "av" | "s95" | "frp" | "frp95"
+const BURN_MODE_LABEL = {age:"burn age", av:"avg spread", s95:"spread p95",
+                         frp:"FRP mean", frp95:"FRP p95"};
+const BURN_MODE_UNIT  = {av:"m / 12 h", s95:"m / 12 h", frp:"W/m²", frp95:"MW"};
+const BURN_MODE_WORDS = {av:["slow","fast"], s95:["slow","fast"],
+                         frp:["weak","intense"], frp95:["weak","intense"]};
 
 // Subclasses L.Renderer rather than L.Layer so Leaflet's own container positioning
 // and zoom-animation transform bookkeeping come for free - the same machinery L.Canvas
@@ -884,10 +1090,11 @@ const BurnLayer = L.Renderer.extend({
     const mode = BURN_COLOR_MODE, sp = this._sp;
     const bands = (mode === "age" || !sp) ? AGE_BANDS : SPREAD_BANDS;
     const NB = bands.length;
-    // spread modes: a forward pointer into the 12-hourly series (cells are time-sorted)
+    // non-age modes: a forward pointer into the 12-hourly series (cells are time-sorted).
+    // `mode` is one of av/s95/frp/frp95, which are exactly the keys decodeSpread() sets.
     const spOn = mode !== "age" && sp;
     const cl = spOn ? SPREAD_CLAMP[mode] : null;
-    const spArr = spOn ? (mode === "av" ? sp.av : sp.s95) : null;
+    const spArr = spOn ? sp[mode] : null;
     let spi = 0;
     if (spOn){ const ms0 = this._absT0 + t[i0]*3600000;
       while (spi + 1 < sp.n && ms0 >= sp.ms[spi + 1]) spi++; }
@@ -966,6 +1173,13 @@ const SnapBandLayer = BurnLayer.extend({
     ctx.globalAlpha = 1;
   },
 });
+// D-83: the analysis-polygon layer (covariate-sampling footprint) was fully removed
+// from the map - it was a reviewer-facing diagnostic, not something a supervisor demo
+// needs, and its ANL_PRE/ANL_POST window is unrelated to the v3/v4 matched-fire
+// re-centred 5 km windows those still use. pyrocb_active_areas.gpkg and the attribute
+// table are untouched; this only removes the map's own extra canvas layer + panel
+// section + legend line. See git history for the removed AnalysisLayer/rebuildAnalysis.
+
 const DOY_BANDS = Array.from({length:48}, (_,i) => ramp(i/47));
 const fireRegion = {};                 // mergid -> region, for filtering the snap bands
 let snapBand = null;
@@ -1039,8 +1253,15 @@ function renderActiveWindow(p, pre, post){
 // ---- bottom-left detail panel: static window slider + animation --------
 let DETAIL_MODE = "panel";            // "panel" | "popup"
 let FIT_ON_SELECT = false;            // pan/zoom the map to the event on select (opt-in)
-let PANEL_MODE  = "static";           // "static" | "animate"
-let winPre = 12, winPost = 12;        // sticky; grid {0,6,12,18,24}, sum >= 6
+let PANEL_MODE  = "animate";          // "static" | "animate" - "Static" is an extended feature now (D-81)
+// Static active-burn window: snapped to this event's own overpass schedule, not
+// fixed hour marks (D-68) - snap_b1/b2_h and snap_a1/a2_h (from timebins.snapshot_
+// offsets_h, same anchor nearby.py's "before" method uses) are the real 1st/2nd
+// before/after overpass times for THIS event. WIN_PRE_IX/WIN_POST_IX (0=none,
+// 1=1st, 2=2nd) are the sticky UI preference across panel opens; winPre/winPost
+// below are the resolved HOURS for the currently-open event, recomputed every time.
+let WIN_PRE_IX = 1, WIN_POST_IX = 1;
+let winPre = 0, winPost = 0;
 let loopSec = 5, animStyle = "cumulative", slideW = 6;   // slideW = sliding-window width (h)
 const infoEl = document.getElementById("info");
 L.DomEvent.disableClickPropagation(infoEl); L.DomEvent.disableScrollPropagation(infoEl);
@@ -1056,52 +1277,103 @@ function openInfoPanel(p){
     ["pyroCb # on fire",p.pcb_index+" of "+p.n_pcb_total],
     ["Match",p.match_method+(p.match_dist_km!=null?` (${p.match_dist_km} km)`:"")],
     ["Fraction burned before",p.frac_burned_before],["Obs lag (h)",p.obs_lag_h],
+    [`Matched fire v2 (${V2_RADIUS} km, ${NEARBY_METHOD_LABEL[V2_METHOD]})`, p[v2Key("lat")]!=null
+      ? `${p[v2Key("n_pixels")]} px, ${p[v2Key("n_fires")]} fire(s), `
+        + `${p[v2Key("area_km2")]} km², ${p[v2Key("det_dt_h")]>0?"+":""}${p[v2Key("det_dt_h")]} h from onset`
+      : "nothing detected within range"],
+    ["Matched fire v4 (4 overpasses, time-weighted)", p.v4_lat!=null
+      ? `${p.v4_area_km2} km² over ${p.v4_n_steps_used} overpasses `
+        + `(${p.v4_n_pixels} px), median ${p.v4_det_dt_h} h from onset`
+      : "no detections in range"],
+    ["Matched fire v3 (radius ladder)", p.v3_lat!=null
+      ? `mergid ${p.v3_mergid}, ${p.v3_search_radius_km} km search, `
+        + `${p.v3_dt_h>0?"+":""}${p.v3_dt_h} h from onset, ${p.v3_match_dist_km} km away, `
+        + `${p.v3_burn_km2} km² actively burning (${p.v3_n_px} px)`
+        + (p.v3_n_fires > 1 ? ` (${p.v3_n_fires} fires)` : "")
+        + (p.v3_pos_source === "polygon_fallback" ? " [no pixels: polygon fallback]" : "")
+      : "no active fire within 20 km"],
   ];
   const seg = (id,a,b) => `<div class="seg"><button id="${id}A" class="on">${a}</button>`
     +`<button id="${id}B">${b}</button></div>`;
+  // 3-way "none / 1st / 2nd" segment for the snap-to-snapshot static window, with the
+  // real per-event hour offset shown in each button and `defIx` marking which starts on.
+  const snapSeg = (id, labels, defIx) => `<span class="seg" id="${id}">`
+    + labels.map((lb,i)=>`<button data-i="${i}"${i===defIx?' class="on"':""}>${lb}</button>`).join("")
+    + `</span>`;
+  const fmtSnapH = h => h==null ? "n/a" : `${h>0?"+":""}${h.toFixed(1)}h`;
   infoEl.innerHTML =
     `<div class="hd">${esc(p.pcb_id)}<span class="x" title="close">&times;</span></div>`
     +`<div class="bd"><div style="color:#666;margin-bottom:3px">${esc(p.fire_name||"unnamed fire")}`
     +(p.active_is_blowup?` &nbsp;<span class="warn">&#9888;&#65039; blow-up</span>`:"")
-    +`</div><table>${rows(dt)}</table>`
-    +(lcTop3Html(p) ? `<div class="sl"><b>Land cover &mdash; `
-        +(p.active_is_blowup?`first 6 h of burning <span class="warn">(blow-up)</span>`:`6 h pre-onset burn`)+`</b>`
-        +`<div style="color:#666;font-size:11px">top 3 classes &middot; native 30 m`
-        +(p.lc_n_px!=null?` &middot; ${p.lc_n_px} cells`:"")+`</div>${lcTop3Html(p)}</div>` : "")
-    +`<div class="sl"><b>Active burn</b> ${seg("pm","Static","Animate")}`
-    +`<div id="paneStatic">`
-      +`<label>before <input type="range" id="slPre" min="0" max="24" step="6" value="${winPre}">`
-      +`<span id="lbPre">${winPre}</span> h</label>`
-      +`<label>after &nbsp;<input type="range" id="slPost" min="0" max="24" step="6" value="${winPost}">`
-      +`<span id="lbPost">${winPost}</span> h</label></div>`
+    +`</div><div style="color:#666;margin-bottom:6px">${esc(p.datetime)} UTC</div>`
+    +`<details class="moreDetails"><summary>More details</summary><div><table>${rows(dt)}</table>`
+    +(bySat[p.mergid] ? `<div class="sl"><b>Satellite imagery &mdash; post-fire</b>`
+        +`<img id="satImg" style="width:100%;border-radius:4px;display:block;margin-top:3px">`
+        +`<div id="satCaption" style="color:#666;font-size:11px;margin-top:2px"></div></div>` : "")
+    +(byGoes[p.pcb_id] ? `<div class="sl"><b>PyroCb cloud &mdash; GOES</b>`
+        +`<img id="goesImg" style="width:100%;border-radius:4px;display:block;margin-top:3px">`
+        +`<div id="goesCaption" style="color:#666;font-size:11px;margin-top:2px"></div></div>` : "")
+    +`</div></details>`
+    +(lcTopNHtml(p,5) ? `<div class="sl"><b>Land cover</b>`
+        +`<div style="color:#666;font-size:11px">top 5 classes &middot; native 30 m`
+        +(p.lc_n_px!=null?` &middot; ${p.lc_n_px} cells`:"")+`</div>${lcTopNHtml(p,5)}</div>` : "")
+    +`<div class="sl"><b>Active burn</b> <span class="extOnly" hidden>${seg("pm","Static","Animate")}</span>`
+    +`<div id="paneStatic" hidden>`
+      +`<label>before ${snapSeg("segPre", ["none", `1st (${fmtSnapH(p.snap_b1_h)})`, `2nd (${fmtSnapH(p.snap_b2_h)})`], WIN_PRE_IX)}</label>`
+      +`<label>after &nbsp;${snapSeg("segPost", ["none", `1st (${fmtSnapH(p.snap_a1_h)})`, `2nd (${fmtSnapH(p.snap_a2_h)})`], WIN_POST_IX)}</label>`
+      +`<div class="sub" style="margin-top:2px">Snaps to this event's own real overpass
+      schedule, not fixed hour marks - "1st before" is the closest look at-or-before onset,
+      "2nd" the one before that, and likewise after. Hours shown are &plusmn; onset.</div></div>`
     +`<div id="paneAnim" hidden>`
-      +`<label>scope <div class="seg"><button id="scA" class="on">&pm;24 h window</button>`
-        +`<button id="scB"${byFireSim[p.mergid]?"":" disabled title='no fire track for this event'"}>Whole fire</button></div></label>`
+      +`<label>scope <div class="seg">`
+        +`<button id="scA" class="extOnly" hidden>&pm;24 h window</button>`
+        +`<button id="scB" class="on"${byFireSim[p.mergid]?"":" disabled title='no fire track for this event'"}>Whole fire</button>`
+        +`<button id="scWeek"${byFireSim[p.mergid]?"":" disabled title='no fire track for this event'"}>Cumulative 1 week</button></div></label>`
       +`<div class="player"><button id="play" title="play / pause">&#9654;</button>`
         +`<span id="cur"></span><span id="curabs"></span></div>`
       +`<div id="scrubwrap"><div id="ticks"></div>`
         +`<input type="range" id="scrub" min="0" max="1000" step="1" value="0"`
-        +` title="drag to scrub through the event"></div>`
+        +` title="drag to scrub through the event">`
+        +`<div id="igticks"></div></div>`
+      +`<label>loop start/stop <input type="range" id="loopLo" min="0" max="1000" step="1" value="0">`
+        +`<input type="range" id="loopHi" min="0" max="1000" step="1" value="1000">`
+        +`<span id="loopRangeLb" style="color:#666;font-size:11px"></span></label>`
       +`<label id="jumpRow" hidden>jump to <input type="text" id="jumpTo" placeholder="e.g. 3d 6h  or  2023-06-04 22:00"`
         +` style="width:150px"><button id="jumpGo">go</button></label>`
-      +`<label>loop <span class="seg" id="loopSeg">`
+      +`<label>loop length <span class="seg" id="loopSeg">`
         + [3,5,10,15,20].map(s=>`<button data-s="${s}">${s}s</button>`).join("") + `</span>`
         +`<input type="number" id="loopCustom" min="1" max="120" step="1" placeholder="s"`
         +` title="custom loop length, 1-120 s"></label>`
-      +`<label>${seg("as","Cumulative","Sliding")}</label>`
+      +`<span class="extOnly" hidden><label>${seg("as","Cumulative","Sliding")}</label>`
       +`<label id="slwRow" hidden>window <span class="seg" id="slwSeg">`
-        + [6,24,48,168].map(s=>`<button data-h="${s}">${s>=168?"1 wk":s+" h"}</button>`).join("") + `</span></label>`
+        + [6,24,48,168].map(s=>`<button data-h="${s}">${s>=168?"1 wk":s+" h"}</button>`).join("") + `</span></label></span>`
       +`<label>colour <span class="seg" id="cmSeg">`
         +`<button data-m="age" class="on">burn age</button>`
-        +`<button data-m="av"${bySpread[p.mergid]?"":" disabled title='no spread series for this fire'"}>avg spread</button>`
-        +`<button data-m="s95"${bySpread[p.mergid]?"":" disabled"}>spread p95</button></span></label>`
+        +`<button data-m="av"${bySpread[p.mergid]?"":" disabled title='no step-attribute series for this fire'"}>avg spread</button>`
+        +`<button data-m="s95"${bySpread[p.mergid]?"":" disabled"}>spread p95</button>`
+        +`<button data-m="frp"${bySpread[p.mergid]?"":" disabled"}>FRP</button>`
+        +`<button data-m="frp95"${bySpread[p.mergid]?"":" disabled"}>FRP95</button></span></label>`
       +`<div id="tierkey" style="color:#666;font-size:11px"></div></div>`
     +`<div class="rd" id="rd"></div>`
     +`<div style="color:#666;font-size:11px">VIIRS active fire, 375 m grid, this fire only.`
     +` Steps snap to the 12 h VIIRS overpass cadence.</div>`
     +`</div></div>`;
   infoEl.style.display = "block";
+  applyExtVisibility(infoEl);
   infoEl.querySelector(".x").onclick = closeInfo;
+
+  const sat = bySat[p.mergid];
+  if (sat){
+    infoEl.querySelector("#satImg").src = sat.file;
+    infoEl.querySelector("#satCaption").textContent = `${sat.date} · ${sat.cloud}% cloud · `
+      + `${Math.round(sat.coverage*100)}% coverage · ${sat.n_scenes} scene(s)`;
+  }
+  const goes = byGoes[p.pcb_id];
+  if (goes){
+    infoEl.querySelector("#goesImg").src = goes.file;
+    infoEl.querySelector("#goesCaption").textContent = `${goes.date} UTC · `
+      + `+${goes.dt_h.toFixed(1)} h after onset · ${Math.round(goes.coverage*100)}% coverage`;
+  }
 
   const $ = id => infoEl.querySelector(id);
   const rd = $("#rd");
@@ -1114,39 +1386,64 @@ function openInfoPanel(p){
       : `no detections in this window`;
   };
 
-  // static
-  const slPre = $("#slPre"), slPost = $("#slPost");
-  const applyStatic = src => {
-    let a = +slPre.value, b = +slPost.value;
-    if (a + b < 6){ if (src==="pre") b = 6 - a; else a = 6 - b; slPre.value=a; slPost.value=b; }
+  // static - snapped to this event's own overpass schedule (D-68), not fixed hours.
+  // PRE_H/POST_H[0] is always 0 ("none"); [1]/[2] are this event's real 1st/2nd
+  // before (hours-before-onset, positive) and 1st/2nd after (hours-after, positive).
+  const PRE_H  = [0, p.snap_b1_h!=null ? -p.snap_b1_h : null, p.snap_b2_h!=null ? -p.snap_b2_h : null];
+  const POST_H = [0, p.snap_a1_h, p.snap_a2_h];
+  const segPre = [...infoEl.querySelectorAll("#segPre button")];
+  const segPost = [...infoEl.querySelectorAll("#segPost button")];
+  const applyStatic = () => {
+    // Both sides "none" would show nothing at all - bump whichever is still at its
+    // default (1st) rather than leave the panel silently empty.
+    if (WIN_PRE_IX===0 && WIN_POST_IX===0) WIN_POST_IX = 1;
+    segPre.forEach(b=>b.classList.toggle("on", +b.dataset.i===WIN_PRE_IX));
+    segPost.forEach(b=>b.classList.toggle("on", +b.dataset.i===WIN_POST_IX));
+    const a = PRE_H[WIN_PRE_IX] ?? 0, b = POST_H[WIN_POST_IX] ?? 0;
     winPre = a; winPost = b;
-    $("#lbPre").textContent = a; $("#lbPost").textContent = b;
     const {n, nb} = renderActiveWindow(p, a, b);
     setReadout(-a, b, n, nb);
   };
-  slPre.oninput = () => applyStatic("pre");
-  slPost.oninput = () => applyStatic("post");
+  segPre.forEach(btn=>btn.onclick=()=>{ WIN_PRE_IX=+btn.dataset.i; applyStatic(); });
+  segPost.forEach(btn=>btn.onclick=()=>{ WIN_POST_IX=+btn.dataset.i; applyStatic(); });
 
   // ---- animate: a scrubbable cursor, not a captive loop ---------------------
   // `animU` in [0,1] is the single source of truth. Playing advances it by elapsed
   // time; the scrubber and the pyroCb ticks set it directly. So pausing, scrubbing
   // and jumping to an event all work without special cases.
   const fsim = byFireSim[p.mergid];
-  let animScope = "win";                 // "win" | "fire"
+  const WEEK_SPAN_H = 168;               // "Cumulative 1 week": +/-84 h around THIS event's own onset
+  // usesFire(): scopes that walk the whole-fire grid (fsim.g) on the fire's own time
+  // axis (t=0 at fire start) rather than a +/-24 h window around this one event.
+  // "fire" = the whole fire; "week" reuses the same grid/axis, just bounded to a
+  // 168 h window centred on this event's own onset instead of the full duration.
+  const usesFire = () => (animScope === "fire" || animScope === "week") && !!fsim;
+  const myFireH = () => fsim
+    ? (Date.parse(String(p.datetime).replace(" ", "T") + "Z")
+       - Date.parse(String(fsim.t0).replace(" ", "T") + "Z")) / 3600e3
+    : 0;
+  const weekBounds = () => {
+    const my = myFireH();
+    const lo = Math.max(0, my - WEEK_SPAN_H/2), hi = Math.min(fsim ? fsim.dur_h : 0, my + WEEK_SPAN_H/2);
+    return [lo, Math.max(lo + 1e-6, hi)];
+  };
+  let animScope = fsim ? "fire" : "win";  // "win" (+/-24h, extended) | "fire" (whole fire) | "week" (cumulative 1 week)
   let animU = 0, lastTs = 0, prevCur = null, snapPts = [];
   const scrub = $("#scrub"), playBtn = $("#play");
-  const spanOf = () => (animScope === "fire" && fsim) ? Math.max(1e-6, fsim.dur_h) : 48;
-  const t0Of   = () => (animScope === "fire" && fsim) ? 0 : -24;
-  const absT0Of = () => (animScope === "fire" && fsim)
+  const spanOf = () => animScope === "fire" && fsim ? Math.max(1e-6, fsim.dur_h)
+    : animScope === "week" && fsim ? (weekBounds()[1] - weekBounds()[0]) : 48;
+  const t0Of   = () => animScope === "fire" && fsim ? 0
+    : animScope === "week" && fsim ? weekBounds()[0] : -24;
+  const absT0Of = () => usesFire()
     ? Date.parse(String(fsim.t0).replace(" ", "T") + "Z") : winAbsT0(p);
-  const gridOf  = () => (animScope === "fire" && fsim) ? fsim.g : byPcbPix[p.pcb_id];
+  const gridOf  = () => usesFire() ? fsim.g : byPcbPix[p.pcb_id];
   const curOf  = u => t0Of() + u * spanOf();
   // Everything the map shows is a 12-hourly VIIRS overpass state, so snap the cursor
   // to the 12 h grid (plus the exact pyroCb onset times, which are worth landing on).
   const buildSnap = () => {
     const t0 = t0Of(), sp = spanOf(), pts = [];
     for (let h = t0; h <= t0 + sp + 1e-6; h += 12) pts.push(Math.min(t0 + sp, h));
-    if (animScope === "fire" && fsim) fsim.pcb_h.forEach(h => { if (h >= t0 && h <= t0+sp) pts.push(h); });
+    if (usesFire()) fsim.pcb_h.forEach(h => { if (h >= t0 && h <= t0+sp) pts.push(h); });
     snapPts = [...new Set(pts.map(v => +v.toFixed(3)))].sort((a,b)=>a-b);
   };
   const snapCur = v => {
@@ -1157,10 +1454,13 @@ function openInfoPanel(p){
   };
   const gridCtx = () => ({span:spanOf(), rampT0:t0Of(), absT0Ms:absT0Of(), mergid:p.mergid});
 
+  // Loop start/stop, as fractions of the CURRENT scope's span [0,1] - lets a reviewer
+  // scrub the animation down to just the interesting stretch instead of the whole thing.
+  let loopLoU = 0, loopHiU = 1;
   function pause(){ stopAnim(); lastTs = 0; playBtn.innerHTML = "&#9654;"; }
   function play(){
     if (animReq) return;
-    if (animU >= 0.999){ animU = 0; prevCur = null; }     // restart from a finished run
+    if (animU >= loopHiU - 0.001){ animU = loopLoU; prevCur = null; }   // restart from a finished run
     lastTs = 0; playBtn.innerHTML = "&#10073;&#10073;";
     animReq = requestAnimationFrame(frame);
   }
@@ -1171,9 +1471,10 @@ function openInfoPanel(p){
     const tr = $("#ticks");
     tr.innerHTML = "";
     tr.style.height = "13px";
-    if (animScope !== "fire" || !fsim) return;
-    const sp = spanOf();
-    const items = fsim.pcb_h.map((h, i) => ({h, i, x: 100 * h / sp})).sort((a,b) => a.x - b.x);
+    if (!usesFire()) return;
+    const t0 = t0Of(), sp = spanOf();
+    const items = fsim.pcb_h.map((h, i) => ({h, i, x: 100 * (h - t0) / sp}))
+      .filter(it => it.x >= -0.5 && it.x <= 100.5).sort((a,b) => a.x - b.x);
     // Greedy row packing: drop each marker into the FIRST row whose last marker is far
     // enough left. Round-robin used to collide again as soon as a 12-event fire bunched
     // several onsets into one afternoon.
@@ -1195,7 +1496,7 @@ function openInfoPanel(p){
       if (it.row){ b.classList.add("staggered");
         b.style.setProperty("--stem", ((maxRow - it.row) * 13 + 13) + "px"); }
       b.onclick = ev => { ev.preventDefault(); ev.stopPropagation();
-        pause(); animU = Math.min(1, Math.max(0, it.h / sp)); prevCur = null; render();
+        pause(); animU = Math.min(1, Math.max(0, (it.h - t0) / sp)); prevCur = null; render();
         const ll = fsim.pcb_ll && fsim.pcb_ll[it.i];
         if (ll) map.panTo(ll, {animate:true});   // centre on the pyroCb, keep the zoom
       };
@@ -1206,12 +1507,55 @@ function openInfoPanel(p){
     if (wrap) wrap.style.paddingTop = (16 + maxRow * 13) + "px";
   };
 
+  // Ignitions of the merge complex, below the scrubber - same greedy row-packing as
+  // drawTicks() (a big complex can carry dozens, e.g. 19 on one 2023 fire), but
+  // unlabelled dots rather than numbered badges: which pyroCb is which matters,
+  // which ignition is which mostly doesn't - order and date are one hover away.
+  const drawIgnTicks = () => {
+    const tr = $("#igticks");
+    tr.innerHTML = "";
+    tr.style.height = "9px";
+    if (!usesFire() || !fsim.ign_h || !fsim.ign_h.length) return;
+    const t0 = t0Of(), sp = spanOf();
+    const items = fsim.ign_h.map((h, i) => ({h, i, x: 100 * (h - t0) / sp}))
+      .filter(it => it.x >= -0.5 && it.x <= 100.5)   // an ignition can predate t0 slightly (nominal vs first pixel)
+      .sort((a,b) => a.x - b.x);
+    const GAP = 3.0;
+    const rowLastX = [];
+    let maxRow = 0;
+    items.forEach(it => {
+      let r = rowLastX.findIndex(x => it.x - x >= GAP);
+      if (r < 0) r = rowLastX.length;
+      rowLastX[r] = it.x; it.row = r;
+      if (r > maxRow) maxRow = r;
+    });
+    items.forEach(it => {
+      const b = document.createElement("b");
+      const ix = fsim.ign_ix ? fsim.ign_ix[it.i] : (it.i + 1);
+      const nTotal = fsim.ign_ix ? fsim.ign_ix.length : items.length;
+      b.title = `Ignition ${ix} of ${nTotal}  (${fmtDur(Math.max(0,it.h))})`;
+      b.style.left = Math.max(0, Math.min(100, it.x)).toFixed(3) + "%";
+      b.style.bottom = (it.row * 11) + "px";
+      if (it.row){ b.classList.add("staggered");
+        b.style.setProperty("--stem", ((maxRow - it.row) * 11 + 11) + "px"); }
+      b.onclick = ev => { ev.preventDefault(); ev.stopPropagation();
+        pause(); animU = Math.min(1, Math.max(0, (it.h - t0) / sp)); prevCur = null; render();
+        const ll = fsim.ign_ll && fsim.ign_ll[it.i];
+        if (ll) map.panTo(ll, {animate:true});
+      };
+      tr.appendChild(b);
+    });
+    tr.style.height = (10 + maxRow * 11) + "px";
+    const wrap = infoEl.querySelector("#scrubwrap");
+    if (wrap) wrap.style.paddingBottom = (11 + maxRow * 11) + "px";
+  };
+
   // dark-red dot at every pyroCb whose onset has been reached; a pulsing ring on the
   // one that just fired this frame (flashIdx).
   const renderPops = (cur, flashIdx) => {
     if (!popLayer) popLayer = L.layerGroup().addTo(map);
     popLayer.clearLayers();
-    if (animScope !== "fire" || !fsim) return;
+    if (!usesFire()) return;
     for (let i = 0; i < fsim.pcb_h.length; i++){
       if (fsim.pcb_h[i] > cur) continue;
       const ll = fsim.pcb_ll[i];
@@ -1228,7 +1572,7 @@ function openInfoPanel(p){
     const lo = animStyle === "cumulative" ? t0Of() : cur - slideW;
     const absMs = absT0Of() + cur * 3600e3;
     const abs = isNaN(absMs) ? "" : new Date(absMs).toISOString().slice(0,16).replace("T"," ") + " UTC";
-    if (animScope === "fire" && fsim){
+    if (usesFire()){
       const n = showGrid(fsim.g, lo, cur, gridCtx()).n;
       $("#cur").textContent = fmtDur(cur) + " / " + fmtDur(fsim.dur_h);
       $("#curabs").textContent = abs;
@@ -1252,13 +1596,35 @@ function openInfoPanel(p){
   }
 
   const frame = ts => {
-    if (lastTs) animU = (animU + (ts - lastTs) / (loopSec * 1000)) % 1;
+    if (lastTs){
+      animU += (ts - lastTs) / (loopSec * 1000);
+      const span = Math.max(1e-6, loopHiU - loopLoU);
+      if (animU >= loopHiU) animU = loopLoU + ((animU - loopLoU) % span);
+      if (animU < loopLoU) animU = loopLoU;
+    }
     lastTs = ts;
     render();
     animReq = requestAnimationFrame(frame);
   };
   playBtn.onclick = () => animReq ? pause() : play();
   scrub.oninput = () => { pause(); animU = (+scrub.value)/1000; prevCur = null; render(); };
+
+  const loopLoEl = $("#loopLo"), loopHiEl = $("#loopHi"), loopRangeLb = $("#loopRangeLb");
+  const syncLoopUI = () => {
+    loopLoEl.value = Math.round(loopLoU*1000); loopHiEl.value = Math.round(loopHiU*1000);
+    const t0 = t0Of(), sp = spanOf();
+    loopRangeLb.innerHTML = `${fmtDur(t0+loopLoU*sp)} &rarr; ${fmtDur(t0+loopHiU*sp)}`;
+  };
+  loopLoEl.oninput = () => {
+    loopLoU = Math.min((+loopLoEl.value)/1000, loopHiU - 0.01);
+    if (animU < loopLoU){ animU = loopLoU; render(); }
+    syncLoopUI();
+  };
+  loopHiEl.oninput = () => {
+    loopHiU = Math.max((+loopHiEl.value)/1000, loopLoU + 0.01);
+    if (animU > loopHiU){ animU = loopHiU; render(); }
+    syncLoopUI();
+  };
 
   const pair = (aId,bId,set,va,vb) => {
     $(aId).onclick = () => { set(va); $(aId).classList.add("on"); $(bId).classList.remove("on"); };
@@ -1313,9 +1679,9 @@ function openInfoPanel(p){
   const AGE_KEY = `Colour = burn age: <span style="color:${AGE_STOPS[0]}">&#9632;</span> first`
     + ` &rarr; <span style="color:${AGE_STOPS[6]};text-shadow:0 0 1px #999">&#9632;</span> last.`;
   const SPD_KEY = m => `Colour = ${BURN_MODE_LABEL[m]}: `
-    + `<span style="color:${SPREAD_STOPS[0]};text-shadow:0 0 1px #999">&#9632;</span> slow`
-    + ` &rarr; <span style="color:${SPREAD_STOPS[6]}">&#9632;</span> fast`
-    + ` (${SPREAD_CLAMP[m][0].toFixed(0)}&ndash;${SPREAD_CLAMP[m][1].toFixed(0)} m / 12 h).`;
+    + `<span style="color:${SPREAD_STOPS[0]};text-shadow:0 0 1px #999">&#9632;</span> ${BURN_MODE_WORDS[m][0]}`
+    + ` &rarr; <span style="color:${SPREAD_STOPS[6]}">&#9632;</span> ${BURN_MODE_WORDS[m][1]}`
+    + ` (${SPREAD_CLAMP[m][0].toFixed(0)}&ndash;${SPREAD_CLAMP[m][1].toFixed(0)} ${BURN_MODE_UNIT[m]}).`;
   const setColourKey = () => {
     $("#tierkey").innerHTML = (BURN_COLOR_MODE === "age" ? AGE_KEY : SPD_KEY(BURN_COLOR_MODE))
       + ` Click a numbered <span style="color:#7d1128">&#9670;</span> to jump to that pyroCb.`;
@@ -1334,12 +1700,15 @@ function openInfoPanel(p){
   });
 
   const setScope = s => {
-    if (s === "fire" && !fsim) s = "win";
+    if ((s === "fire" || s === "week") && !fsim) s = "win";
     animScope = s; prevCur = null; pause();
-    $("#scA").classList.toggle("on", s === "win"); $("#scB").classList.toggle("on", s === "fire");
-    $("#jumpRow").hidden = s !== "fire";
-    if (s !== "fire") clearPops();
-    buildSnap(); drawTicks(); setColourKey();
+    $("#scA").classList.toggle("on", s === "win");
+    $("#scB").classList.toggle("on", s === "fire");
+    $("#scWeek").classList.toggle("on", s === "week");
+    $("#jumpRow").hidden = s === "win";
+    if (s === "win") clearPops();
+    loopLoU = 0; loopHiU = 1;               // a scope change moves the goalposts - reset the loop range
+    buildSnap(); drawTicks(); drawIgnTicks(); setColourKey(); syncLoopUI();
     // Show the whole extent first, so you can see what you are about to animate;
     // pressing play rewinds to the start.
     showGrid(gridOf(), t0Of(), t0Of() + spanOf(), {...gridCtx(), fit:true});
@@ -1347,6 +1716,7 @@ function openInfoPanel(p){
   };
   $("#scA").onclick = () => setScope("win");
   $("#scB").onclick = () => setScope("fire");
+  $("#scWeek").onclick = () => setScope("week");
 
   $("#pmA").onclick = () => { PANEL_MODE="static"; pause(); clearPops();
     $("#pmA").classList.add("on"); $("#pmB").classList.remove("on");
@@ -1406,6 +1776,12 @@ map.getPane("hl").style.pointerEvents = "none";                      // ...but t
 map.createPane("pop"); map.getPane("pop").style.zIndex = 495;        // "a pyroCb popped" markers, above the burn canvas
 map.getPane("pop").style.pointerEvents = "none";
 R.pop = L.canvas({pane:"pop"});
+map.createPane("nb2"); map.getPane("nb2").style.zIndex = 465;        // matched-fire-v2 circle/active-fire overlay, above pyroCb+orp
+R.nb2 = L.canvas({pane:"nb2"});
+map.createPane("nb3"); map.getPane("nb3").style.zIndex = 466;        // matched-fire-v3 circle/active-fire overlay, just above nb2
+R.nb3 = L.canvas({pane:"nb3"});
+map.createPane("nb4"); map.getPane("nb4").style.zIndex = 467;        // matched-fire-v4 overlay, just above nb3
+R.nb4 = L.canvas({pane:"nb4"});
 burn = new BurnLayer({pane:"hl", padding:0.15}).addTo(map);
 snapBand = new SnapBandLayer({pane:"bnd", padding:0.15}).addTo(map);
 
@@ -1417,8 +1793,26 @@ const showRegion = {};                 // country toggles, all on to start
 REGIONS.forEach(r => showRegion[r] = true);
 const OUTLINE = {per:false, bnd:false}; // draw as border only, no fill
 let BAND_SRC = "pcb";                  // "pcb" = split at pyroCb | "snap" = 12 h snapshot
-let PCB_POS  = "report";               // "report" = atlas lat/lon | "fire" = matched-burn centroid
+let PCB_POS  = "fire4";                // D-81: v4 (4-overpass time-weighted match) is now the default. "report" = atlas lat/lon | "fire" = matched-burn centroid (v1, via mergid) | "fire2" = nearby-snapshot centroid (v2, identity-free) | "fire3" = radius-ladder match (v3) | "fire4" = time-weighted match (v4)
 let SHOW_ERR = false;                  // draw the +/-0.1 deg report uncertainty
+let V2_RADIUS = NEARBY_RADII[0];       // km - which matched-fire-v2 radius is in view (config.NEARBY_RADII_KM)
+let V2_METHOD = NEARBY_METHODS[0];     // which snapshot-selection strategy is in view (config.NEARBY_METHODS)
+// One-line explanation per strategy - full reasoning is pyrocb/nearby.py's docstring.
+const NEARBY_METHOD_DESC = {
+  closest: "Nearest overpass in time, before OR after onset - no causal claim, just whichever look was closest.",
+  before: "Nearest overpass AT OR BEFORE onset. Falls through to an AFTER-onset overpass only once every before-onset option has turned up nothing - i.e. for a blow-up fire, structurally, not a separate flag.",
+  before_after: "Nearest before-onset AND nearest after-onset overpass, POOLED into one search - roughly double the detections of a single-overpass strategy.",
+  before2_after2: "Nearest TWO before-onset AND nearest TWO after-onset overpasses, pooled - the widest net, ~2 days of overpasses either side.",
+};
+let SHOW_NB2_CIRCLE = false;           // draw the v2 search radius around the AS-REPORTED point (where the search ran)
+let SHOW_NB2_FIRE   = false;           // draw the actual active-fire ground the v2 centroid was taken from
+let SHOW_NB2_ARROW  = false;           // draw as-reported -> matched-fire-v2 as an arrow
+let SHOW_NB3_CIRCLE = false;           // draw the v3 search radius actually used (varies per event) around the AS-REPORTED point
+let SHOW_NB3_FIRE   = false;           // draw the matched Snapshot fire polygon itself
+let SHOW_NB3_ARROW  = false;           // draw as-reported -> matched-fire-v3 as an arrow
+let SHOW_NB4_CIRCLE = false;           // v4 uses the same per-event ladder radius as v3
+let SHOW_NB4_FIRE   = false;           // draw v4's time-weighted active-burn window
+let SHOW_NB4_ARROW  = false;           // draw as-reported -> matched-fire-v4 as an arrow
 const regionOK = ft => { const r = ft.properties.region;
   return r == null ? true : showRegion[r] !== false; };
 
@@ -1434,19 +1828,21 @@ const LC_LAB = {1:"Needleleaf forest",2:"Taiga needleleaf",5:"Broadleaf deciduou
 // Land-cover composition of a pyroCb's 6 h-before-onset active-burn polygon (30 m).
 function lcSwatch(c){return `<span style="display:inline-block;width:12px;height:12px;`
   +`border-radius:2px;margin-right:5px;vertical-align:-2px;background:${LC_COL[c]||'#999'}"></span>`;}
-function lcTop3Html(p){
+function lcTopNHtml(p, n){
   const a=[];
-  for(let i=1;i<=3;i++){const c=p["lc_top"+i+"_cls"], f=p["lc_top"+i+"_frac"];
+  for(let i=1;i<=n;i++){const c=p["lc_top"+i+"_cls"], f=p["lc_top"+i+"_frac"];
     if(c!=null&&f!=null) a.push(`<div style="margin:2px 0">${lcSwatch(c)}`
       +`${esc(LC_LAB[c]||("class "+c))} <b>${Math.round(f*100)}%</b></div>`);}
   return a.join("");
 }
-function lcTop3Text(p){
+function lcTopNText(p, n){
   const a=[];
-  for(let i=1;i<=3;i++){const c=p["lc_top"+i+"_cls"], f=p["lc_top"+i+"_frac"];
+  for(let i=1;i<=n;i++){const c=p["lc_top"+i+"_cls"], f=p["lc_top"+i+"_frac"];
     if(c!=null&&f!=null) a.push((LC_LAB[c]||("class "+c))+" "+Math.round(f*100)+"%");}
   return a.join(", ");
 }
+const lcTop3Html = p => lcTopNHtml(p, 3);
+const lcTop3Text = p => lcTopNText(p, 3);
 let hideOrphans=false;
 
 // One definition of the perimeter / band look, shared by first draw and recolour().
@@ -1555,6 +1951,14 @@ function buildLayers(y, gj){
           })(),
     per:  L.geoJSON(gj.per, perOpts),
     bnd:  L.geoJSON(gj.bnd, bndOpts),
+    // Matched-fire-v2 "active fire used for centering" polygons: kept as raw GeoJSON,
+    // not an always-on L.geoJSON layer, because which features are relevant changes
+    // with PCB_POS / V2_RADIUS / V2_METHOD / the region+date filters - see rebuildNb2().
+    nb2raw: gj.nb2 || {type:"FeatureCollection", features:[]},
+    // Matched-fire-v3's own matched Snapshot polygon - same "raw, rebuilt on demand"
+    // treatment, but no radius/method to filter by (one match per event) - see rebuildNb3().
+    nb3raw: gj.nb3 || {type:"FeatureCollection", features:[]},
+    nb4raw: gj.nb4 || {type:"FeatureCollection", features:[]},
     ign:  L.geoJSON(gj.ign, ignOpts),
     pcb:  L.geoJSON(gj.pcb, pcbOpts(undefined)),
     pcbC: L.geoJSON(gj.pcb, pcbOpts(f=>f.properties.match_method!=="unmatched")),
@@ -1583,16 +1987,18 @@ function wanted(){
 async function ensureYear(y){
   if (cache[y]) return cache[y];
   const d = DATA[y];
-  const [per,ign,pcb,bnd,pix,lc,sim,spr] = await Promise.all(
-    [d.per,d.ign,d.pcb,d.bnd,d.pix,d.lc,d.sim,d.spr].map(unpack));
+  const [per,ign,pcb,bnd,pix,lc,sim,spr,nb2,nb3,nb4,sat,goes] = await Promise.all(
+    [d.per,d.ign,d.pcb,d.bnd,d.pix,d.lc,d.sim,d.spr,d.nb2,d.nb3,d.nb4,d.sat,d.goes].map(unpack));
   Object.assign(byPcbPix, pix);          // pcb_id -> +/-24 h cell grid
   Object.assign(byFireSim, sim);         // mergid  -> whole-fire series
   Object.assign(bySpread, spr||{});      // mergid  -> 12-hourly spread series
+  Object.assign(bySat, sat||{});         // mergid  -> post-fire satellite imagery
+  Object.assign(byGoes, goes||{});       // pcb_id  -> pyroCb cloud imagery (GOES)
   (per.features||[]).forEach(f => { if (f.properties.region != null)
     fireRegion[String(f.properties.mergid)] = f.properties.region; });
   // lcpng is already-base64 PNG, so it is embedded raw - gzipping it would only add
   // a second base64 pass over incompressible data.
-  cache[y] = buildLayers(y,{per,ign,pcb,bnd,lc,lcpng:d.lcpng||{}});
+  cache[y] = buildLayers(y,{per,ign,pcb,bnd,lc,lcpng:d.lcpng||{},nb2,nb3,nb4});
   return cache[y];
 }
 
@@ -1648,6 +2054,16 @@ function recolour(){
   drawLegend();
 }
 
+// D-81: "hide, don't delete" feature toggle. Every element carrying class="extOnly" is
+// shown only once the supervisor-facing default view is turned off via the "Show
+// advanced options" checkbox - the underlying feature/handlers are unchanged, just its
+// visibility. applyExtVisibility() is called once after the control panel is built and
+// again after every openInfoPanel() render (the info panel's DOM is rebuilt per click).
+let SHOW_EXTENDED = false;
+function applyExtVisibility(root){
+  (root || document).querySelectorAll(".extOnly").forEach(el => { el.hidden = !SHOW_EXTENDED; });
+}
+
 // ---- controls -------------------------------------------------------------
 const panel = L.control({position:"topright"});
 panel.onAdd = () => {
@@ -1655,7 +2071,9 @@ panel.onAdd = () => {
   d.innerHTML = `<h4>Years</h4>
     <div class="chips">${YEARS.map(y=>`<button class="chip" data-year="${y}">${y}</button>`).join("")}</div>
     <div class="mini"><button id="allY">All</button><button id="noneY">None</button></div>
-    <details class="sec" id="animBox"><summary>Animate <span class="tag" id="animTag"></span></summary><div>
+    <label style="display:block;margin:4px 0"><input type="checkbox" id="showExtended">
+      Show advanced options</label>
+    <details class="sec extOnly" hidden id="animBox"><summary>Animate <span class="tag" id="animTag"></span></summary><div>
       <div class="seg" id="gmodeSeg">
         <button data-g="off" class="on">Off</button><button data-g="year">Years</button>
         <button data-g="month">Months</button></div>
@@ -1668,7 +2086,7 @@ panel.onAdd = () => {
           <button data-s="0.4">fast</button><button data-s="0.9" class="on">med</button>
           <button data-s="2">slow</button></span></label>
       </div></div></details>
-    <details class="sec"><summary>Regions <span class="tag" id="regTag"></span></summary><div>
+    <details class="sec extOnly" hidden><summary>Regions <span class="tag" id="regTag"></span></summary><div>
       ${REGIONS.map(r=>`<label><input type="checkbox" data-region="${r}" checked> ${r}</label>`).join("")}
     </div></details>
     <details class="sec" open><summary>Layers</summary><div>
@@ -1687,14 +2105,55 @@ panel.onAdd = () => {
     <details class="sec"><summary>Colour by <span class="tag" id="colTag">year</span></summary><div>
       <div class="seg"><button id="mYear" class="on">Year</button><button id="mDoy">Day of year</button></div>
       <div class="sub">Pick one year to watch a season progress.</div></div></details>
-    <details class="sec"><summary>pyroCb position</summary><div>
-      <div class="seg"><button id="posRep" class="on">As reported</button><button id="posFire">Matched fire</button></div>
+    <details class="sec" open><summary>pyroCb position</summary><div>
+      <div class="seg"><button id="posFire4" class="on">Matched fire v4</button>
+        <span class="extOnly" hidden><button id="posRep">As reported</button><button id="posFire2">Matched fire v2</button><button id="posFire3">Matched fire v3</button></span></div>
+      <div id="v4Opts">
+      <div class="sub" style="margin:6px 0 2px">Matched fire v4 (D&#8209;76): the 4
+      time-closest overpasses pooled, every VIIRS pixel weighted exp(&minus;|&Delta;t|/12 h)
+      on its real detection time and normalised per overpass, so timing rather than pixel
+      count decides the pull. Events with no detections in range stay at the atlas point.
+      This is the map's default position.</div>
+      <label><input type="checkbox" id="showNb4Circle"> show v4 search circle (radius actually used, around the reported point)</label>
+      <label><input type="checkbox" id="showNb4Fire"> show v4 active burn (time-weighted, 4 overpasses)</label>
+      <label><input type="checkbox" id="showNb4Arrow"> show arrow: as-reported &rarr; matched fire v4</label>
+      </div>
+      <span class="extOnly" hidden>
       <label><input type="checkbox" id="showErr"> show report uncertainty box</label>
       <div class="sub">93 % of atlas coordinates are rounded to 0.1&deg; (~11 km N-S); the
-      box is drawn at that grid (tighter for the few finer ones). "Matched fire" re-plots
-      each event on the centroid of its own 6 h pre-onset burn, known to one 375 m pixel.</div>
+      box is drawn at that grid (tighter for the few finer ones). "Matched fire v2" ignores
+      fire identity altogether: it re-plots each event on the plain (unweighted) mean position
+      of every VIIRS detection within the chosen radius of the report, at the overpass(es) the
+      chosen strategy selects. Denser clusters of detections pull the mean toward themselves
+      automatically - 10 detections on one side and 1 on the other lands the point 10x closer
+      to the 10 - no separate weighting is applied on top of that. Events with nothing detected
+      that close keep their "as reported" spot.</div>
+      <div id="v2Opts" hidden>
+      <div class="sub" style="margin:6px 0 2px">Radius</div>
+      <div class="seg" id="v2RadSeg">${NEARBY_RADII.map((r,i)=>
+        `<button data-r="${r}" class="${i===0?"on":""}">${r} km</button>`).join("")}</div>
+      <div class="sub" style="margin:6px 0 2px">Snapshot strategy</div>
+      <div class="seg" id="v2MethodSeg">${NEARBY_METHODS.map((m,i)=>
+        `<button data-m="${m}" class="${i===0?"on":""}">${NEARBY_METHOD_LABEL[m]}</button>`).join("")}</div>
+      <div class="sub" id="v2MethodDesc" style="margin:4px 0 2px"></div>
+      <label><input type="checkbox" id="showNb2Circle"> show v2 search circle (around the reported point)</label>
+      <label><input type="checkbox" id="showNb2Fire"> show active fire used for centering</label>
+      <label><input type="checkbox" id="showNb2Arrow"> show arrow: as-reported &rarr; matched fire v2</label>
+      </div>
+      <div id="v3Opts" hidden>
+      <div class="sub" style="margin:6px 0 2px">Matched fire v3 (PCB_MATCHING_CLEAN.ipynb, D-70): one
+      position per event, from an explicit radius ladder - closest-in-time Snapshot fire within
+      10 km; if none, the 2nd-closest ONLY if within &plusmn;12 h of onset; else widen to 12.5 /
+      15 / 17.5 / 20 km, retrying the same two time-candidates; nothing within 20 km at either
+      candidate leaves the event at its "as reported" spot. No radius/method picker here - each
+      event already carries its own single resolved match.</div>
+      <label><input type="checkbox" id="showNb3Circle"> show v3 search circle (radius actually used, around the reported point)</label>
+      <label><input type="checkbox" id="showNb3Fire"> show active burn (VIIRS pixels, 5 km window)</label>
+      <label><input type="checkbox" id="showNb3Arrow"> show arrow: as-reported &rarr; matched fire v3</label>
+      </div>
+      </span>
       </div></details>
-    <details class="sec"><summary>pyroCb click</summary><div>
+    <details class="sec extOnly" hidden><summary>pyroCb click</summary><div>
       <div class="seg"><button id="dPanel" class="on">Info panel</button><button id="dPopup">Popup</button></div>
       <label><input type="checkbox" id="fitSel"> Zoom map to event on select</label></div></details>`;
   L.DomEvent.disableClickPropagation(d); L.DomEvent.disableScrollPropagation(d);
@@ -1710,6 +2169,11 @@ panel.onAdd = () => {
   d.querySelectorAll("input[data-region]").forEach(i=>i.onchange=()=>{
     showRegion[i.dataset.region]=i.checked; regTag(); forceFilter(); updateGBar();});
   regTag();
+  d.querySelector("#showExtended").onchange = e=>{
+    SHOW_EXTENDED=e.target.checked; applyExtVisibility(d);
+    if (infoEl.style.display !== "none") applyExtVisibility(infoEl);
+  };
+  applyExtVisibility(d);
   d.querySelector("#hideOrp").onchange = e=>{hideOrphans=e.target.checked; refresh();};
   d.querySelector("#fitSel").onchange = e=>{FIT_ON_SELECT=e.target.checked;};
   d.querySelector("#perOutline").onchange = e=>{OUTLINE.per=e.target.checked; forceFilter();};
@@ -1723,10 +2187,46 @@ panel.onAdd = () => {
     colTag.textContent="year"; recolour();};
   mdy.onclick = ()=>{MODE="doy";  mdy.classList.add("on"); my.classList.remove("on");
     colTag.textContent="day of year"; recolour();};
-  const pr=d.querySelector("#posRep"), pf=d.querySelector("#posFire");
-  pr.onclick = ()=>{PCB_POS="report"; pr.classList.add("on"); pf.classList.remove("on"); repositionPcb();};
-  pf.onclick = ()=>{PCB_POS="fire";   pf.classList.add("on"); pr.classList.remove("on"); repositionPcb();};
+  const pr=d.querySelector("#posRep"), pf2=d.querySelector("#posFire2"), pf3=d.querySelector("#posFire3"),
+        pf4=d.querySelector("#posFire4");
+  const v2Opts = d.querySelector("#v2Opts"), v3Opts = d.querySelector("#v3Opts"),
+        v4Opts = d.querySelector("#v4Opts");
+  const setPos = (mode, on) => {
+    PCB_POS=mode; [pr,pf2,pf3,pf4].forEach(b=>b.classList.toggle("on", b===on));
+    v2Opts.hidden = mode !== "fire2";
+    v3Opts.hidden = mode !== "fire3";
+    repositionPcb(); drawLegend();
+  };
+  pr.onclick  = ()=>setPos("report", pr);
+  pf2.onclick = ()=>setPos("fire2",  pf2);
+  pf3.onclick = ()=>setPos("fire3",  pf3);
+  pf4.onclick = ()=>setPos("fire4",  pf4);
   d.querySelector("#showErr").onchange = e=>{SHOW_ERR=e.target.checked; repositionPcb();};
+  const v2RadBtns = [...d.querySelectorAll("#v2RadSeg button")];
+  v2RadBtns.forEach(b=>b.onclick=()=>{
+    V2_RADIUS = +b.dataset.r;
+    v2RadBtns.forEach(x=>x.classList.toggle("on", x===b));
+    repositionPcb(); drawLegend();
+  });
+  const v2MethodBtns = [...d.querySelectorAll("#v2MethodSeg button")];
+  const v2MethodDesc = d.querySelector("#v2MethodDesc");
+  const setV2MethodDesc = () => { v2MethodDesc.innerHTML = NEARBY_METHOD_DESC[V2_METHOD]; };
+  v2MethodBtns.forEach(b=>b.onclick=()=>{
+    V2_METHOD = b.dataset.m;
+    v2MethodBtns.forEach(x=>x.classList.toggle("on", x===b));
+    setV2MethodDesc();
+    repositionPcb(); drawLegend();
+  });
+  setV2MethodDesc();
+  d.querySelector("#showNb2Circle").onchange = e=>{SHOW_NB2_CIRCLE=e.target.checked; repositionPcb(); drawLegend();};
+  d.querySelector("#showNb2Fire").onchange   = e=>{SHOW_NB2_FIRE=e.target.checked; repositionPcb(); drawLegend();};
+  d.querySelector("#showNb2Arrow").onchange  = e=>{SHOW_NB2_ARROW=e.target.checked; repositionPcb(); drawLegend();};
+  d.querySelector("#showNb3Circle").onchange = e=>{SHOW_NB3_CIRCLE=e.target.checked; repositionPcb(); drawLegend();};
+  d.querySelector("#showNb3Fire").onchange   = e=>{SHOW_NB3_FIRE=e.target.checked; repositionPcb(); drawLegend();};
+  d.querySelector("#showNb3Arrow").onchange  = e=>{SHOW_NB3_ARROW=e.target.checked; repositionPcb(); drawLegend();};
+  d.querySelector("#showNb4Circle").onchange = e=>{SHOW_NB4_CIRCLE=e.target.checked; repositionPcb(); drawLegend();};
+  d.querySelector("#showNb4Fire").onchange   = e=>{SHOW_NB4_FIRE=e.target.checked; repositionPcb(); drawLegend();};
+  d.querySelector("#showNb4Arrow").onchange  = e=>{SHOW_NB4_ARROW=e.target.checked; repositionPcb(); drawLegend();};
   const dp=d.querySelector("#dPanel"), du=d.querySelector("#dPopup");
   dp.onclick = ()=>{DETAIL_MODE="panel"; dp.classList.add("on"); du.classList.remove("on");
     Object.keys(cache).forEach(y=>cache[y].pcb.eachLayer(l=>l.unbindPopup&&l.unbindPopup()));};
@@ -1798,8 +2298,32 @@ function drawLegend(){
       : `Growth bands: pale core = burned before the first pyroCb, darker = later runs;
          the faintest outer band is after the last pyroCb.`}
     Click a pyroCb for its active-burn window &amp; animation.</div>`
-    + (PCB_POS==="fire" ? `<div class="sub" style="color:#7d1128">pyroCb plotted on the
-        matched fire's 6 h pre-onset burn centroid (375 m), not the atlas point.</div>` : "")
+    + (PCB_POS==="fire2" ? `<div class="sub" style="color:#7d1128">pyroCb plotted on the
+        matched-fire-v2 position: the unweighted mean of every VIIRS detection within
+        ${V2_RADIUS} km of the report, at the overpass(es) "${NEARBY_METHOD_LABEL[V2_METHOD]}"
+        selects. Events with nothing detected that close stay at the atlas point.
+        ${SHOW_NB2_CIRCLE?` Dashed circle = the ${V2_RADIUS} km search radius, drawn around the
+          reported point it was searched from.`:""}
+        ${SHOW_NB2_FIRE?" Teal = the detections actually averaged.":""}
+        ${SHOW_NB2_ARROW?" Arrow = as-reported &rarr; matched fire v2.":""}</div>` : "")
+    + (PCB_POS==="fire3" ? `<div class="sub" style="color:#15803d">pyroCb plotted on the
+        matched-fire-v3 position: the radius-ladder match from PCB_MATCHING_CLEAN.ipynb
+        (D-70) - closest-in-time Snapshot fire within 10-20 km, escalating radius, the
+        2nd time-candidate capped at &plusmn;12 h. Events with no active fire within
+        20 km stay at the atlas point.
+        ${SHOW_NB3_CIRCLE?` Dashed circle = the search radius actually used for this
+          event, drawn around the reported point it was searched from.`:""}
+        ${SHOW_NB3_FIRE?" Green = the matched Snapshot fire polygon.":""}
+        ${SHOW_NB3_ARROW?" Arrow = as-reported &rarr; matched fire v3.":""}</div>` : "")
+    + (PCB_POS==="fire4" ? `<div class="sub" style="color:#b45309">pyroCb plotted on the
+        matched-fire-v4 position (D&#8209;76): the 4 time-closest overpasses pooled, every
+        VIIRS pixel weighted exp(&minus;|&Delta;t|/12 h) on its real detection time and
+        normalised per overpass, so timing rather than pixel count decides the pull.
+        Events with no detections in range stay at the atlas point.
+        ${SHOW_NB4_CIRCLE?` Dashed circle = the ladder radius used for this event, drawn
+          around the reported point it was searched from.`:""}
+        ${SHOW_NB4_FIRE?" Amber = the time-weighted active burn.":""}
+        ${SHOW_NB4_ARROW?" Arrow = as-reported &rarr; matched fire v4.":""}</div>` : "")
     + (showKind.lc ? `<details class="lcdd"><summary>Land cover</summary><div class="body">`
         + [1,2,5,6,8,10,11,12,13,14,15,16,18].map(c =>
             `<div class="row"><i class="sq" style="background:${LC_COL[c]}"></i>${LC_LAB[c]}</div>`
@@ -1885,7 +2409,7 @@ const gticks = () => document.getElementById("gticks");
 let gMode = "off", gU = 1, gReq = null, gLastTs = 0, gStepSec = 0.9;
 let dateFilterDoy = null, _lastFilterDoy = -1;
 let yearsBeforeAnim = null;            // restored when the year animation is switched off
-const MONTH_LO = 3, MONTH_HI = 10;
+const MONTH_LO = 1, MONTH_HI = 12;   // D-79: was 3-10 (boreal-only); global inventory needs the full year
 const gSteps = () => gMode === "year" ? YEARS.length : (MONTH_HI + 1 - MONTH_LO) + 1;
 // step index 0..n-1 from the 0..1 scrub position
 const gIdx = () => Math.min(gSteps() - 1, Math.floor(gU * gSteps() * 0.999999));
@@ -1909,14 +2433,21 @@ let errLayer = null;
 // Is this pyroCb marker actually on screen right now? (region + date filters + the
 // "hide unmatched" toggle + the layer checkbox). The uncertainty box must obey the
 // same rules, so a hidden event never leaves a stray box behind.
-function pcbShown(ft){
+// Does this event pass the data filters (region, date cursor, hide-unmatched)?
+// Separate from the pyroCb LAYER toggle, so overlays that are not decorations of the
+// marker - the analysis polygon - can stay visible with the markers switched off.
+function eventVisible(ft){
   const p = ft.properties;
-  if (!showKind.pcb) return false;
   if (!regionOK(ft)) return false;
   if (hideOrphans && p.match_method === "unmatched") return false;
   if (dateFilterDoy != null && !(p.doy != null && p.doy <= dateFilterDoy)) return false;
   return true;
 }
+function pcbShown(ft){ return showKind.pcb && eventVisible(ft); }
+// v2 field names are keyed by radius AND method: fire2_r10_before_lat,
+// fire2_r15_before2_after2_lon, ... (see pyrocb/nearby.py `_key`).
+const v2Key = (base) => `fire2_r${V2_RADIUS}_${V2_METHOD}_${base}`;
+
 function repositionPcb(){
   if (errLayer){ map.removeLayer(errLayer); errLayer = null; }
   if (SHOW_ERR) errLayer = L.layerGroup().addTo(map);
@@ -1924,8 +2455,17 @@ function repositionPcb(){
     const c = cache[y];
     ["pcb","pcbC","orp"].forEach(k => c[k] && c[k].eachLayer(l => {
       const p = l.feature.properties, g = l.feature.geometry.coordinates;
-      const useFire = PCB_POS === "fire" && p.fire_lat != null && p.fire_lon != null;
-      if (l.setLatLng) l.setLatLng(useFire ? [p.fire_lat, p.fire_lon] : [g[1], g[0]]);
+      // v2/v3 both fall back to the "as reported" point when they have nothing for
+      // this event (v2: no VIIRS detection within V2_RADIUS; v3: no active fire
+      // within 20 km at either time-candidate).
+      let pos = [g[1], g[0]];
+      if (PCB_POS === "fire2" && p[v2Key("lat")] != null && p[v2Key("lon")] != null)
+        pos = [p[v2Key("lat")], p[v2Key("lon")]];
+      if (PCB_POS === "fire3" && p.v3_lat != null && p.v3_lon != null)
+        pos = [p.v3_lat, p.v3_lon];
+      if (PCB_POS === "fire4" && p.v4_lat != null && p.v4_lon != null)
+        pos = [p.v4_lat, p.v4_lon];
+      if (l.setLatLng) l.setLatLng(pos);
     }));
     if (errLayer && PCB_POS === "report" && activeYears.has(+y) && c.pcb)
       c.pcb.eachLayer(l => {
@@ -1936,6 +2476,249 @@ function repositionPcb(){
           {pane:"orp", renderer:R.orp, color:"#e11", weight:1, opacity:0.7,
            dashArray:"3 3", fill:false, interactive:false}).addTo(errLayer);
       });
+  }
+  rebuildNb2();
+  rebuildNb3();
+  rebuildNb4();
+}
+
+// ---- matched-fire-v2 extras: search circle, the active-fire ground behind it, and
+// an arrow from the as-reported point to the v2 position -------------------------
+function bearingDeg(lat1, lon1, lat2, lon2){
+  // Standard initial-bearing formula (0 = north, clockwise), degrees. Short arrows
+  // only, so no need to worry about which great-circle branch it takes.
+  const rad = d => d * Math.PI / 180;
+  const dLon = rad(lon2 - lon1), la1 = rad(lat1), la2 = rad(lat2);
+  const y = Math.sin(dLon) * Math.cos(la2);
+  const x = Math.cos(la1) * Math.sin(la2) - Math.sin(la1) * Math.cos(la2) * Math.cos(dLon);
+  return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+}
+let nb2Layer = null;
+function rebuildNb2(){
+  if (nb2Layer){ map.removeLayer(nb2Layer); nb2Layer = null; }
+  if (PCB_POS !== "fire2" || (!SHOW_NB2_CIRCLE && !SHOW_NB2_FIRE && !SHOW_NB2_ARROW)) return;
+
+  // Which pyroCb are actually on screen right now, reusing the exact same rule the
+  // markers themselves obey (region/date filters, hide-unmatched, layer toggle) -
+  // so these overlays never outlive a hidden event.
+  const shown = new Set();
+  for (const y of Object.keys(cache)){
+    if (!activeYears.has(+y)) continue;
+    const c = cache[y];
+    c.pcb && c.pcb.eachLayer(l => { if (pcbShown(l.feature)) shown.add(l.feature.properties.pcb_id); });
+  }
+  if (!shown.size) return;
+
+  nb2Layer = L.layerGroup().addTo(map);
+
+  if (SHOW_NB2_CIRCLE){
+    for (const y of Object.keys(cache)){
+      if (!activeYears.has(+y)) continue;
+      cache[y].pcb.eachLayer(l => {
+        const p = l.feature.properties, g = l.feature.geometry.coordinates;
+        if (!shown.has(p.pcb_id) || p[v2Key("lat")] == null) return;
+        // Centred on the AS-REPORTED point, because that is where the search actually
+        // ran (nearby.py balls the KD-tree around the atlas lat/lon). Drawing it around
+        // the result would imply the detections were gathered around the answer.
+        // `feature.geometry` keeps the reported coordinates even while PCB_POS moves the
+        // marker itself - setLatLng does not write back to the feature.
+        L.circle([g[1], g[0]], {
+          radius: V2_RADIUS * 1000, pane:"nb2", renderer:R.nb2,
+          color:"#7d1128", weight:1.5, dashArray:"4 4", fill:false, interactive:false,
+        }).addTo(nb2Layer);
+      });
+    }
+  }
+
+  if (SHOW_NB2_ARROW){
+    for (const y of Object.keys(cache)){
+      if (!activeYears.has(+y)) continue;
+      cache[y].pcb.eachLayer(l => {
+        const p = l.feature.properties, g = l.feature.geometry.coordinates;
+        if (!shown.has(p.pcb_id) || p[v2Key("lat")] == null) return;
+        const from = [g[1], g[0]], to = [p[v2Key("lat")], p[v2Key("lon")]];
+        if (from[0] === to[0] && from[1] === to[1]) return;   // nothing to draw
+        L.polyline([from, to], {pane:"nb2", renderer:R.nb2, color:"#7d1128",
+          weight:2, opacity:0.85, interactive:false}).addTo(nb2Layer);
+        const brg = bearingDeg(from[0], from[1], to[0], to[1]);
+        L.marker(to, {pane:"nb2", interactive:false, icon:L.divIcon({className:"",
+          iconSize:[14,14], iconAnchor:[7,7],
+          html:`<div style="width:0;height:0;border-left:6px solid transparent;`
+            +`border-right:6px solid transparent;border-bottom:11px solid #7d1128;`
+            +`transform:rotate(${brg}deg);transform-origin:50% 70%"></div>`,
+        })}).addTo(nb2Layer);
+      });
+    }
+  }
+
+  if (SHOW_NB2_FIRE){
+    for (const y of Object.keys(cache)){
+      if (!activeYears.has(+y)) continue;
+      const feats = (cache[y].nb2raw.features || [])
+        .filter(f => f.properties.radius_km === V2_RADIUS && f.properties.method === V2_METHOD
+                    && shown.has(f.properties.pcb_id));
+      if (!feats.length) continue;
+      L.geoJSON({type:"FeatureCollection", features:feats}, {
+        pane:"nb2", renderer:R.nb2,
+        style: () => ({color:"#0d9488", weight:1, fillColor:"#2dd4bf", fillOpacity:0.55}),
+        onEachFeature:(ft,l)=>{const p=ft.properties;
+          l.bindPopup(`<b>Detections used for centering</b> &middot; ${esc(p.pcb_id)}<table>${rows([
+            ["Radius (km)",p.radius_km],["VIIRS detections",p.n_pixels],
+            ["Footprint area (km²)",p.area_km2],
+            ["Fires touched",p.n_fires],["mergid(s)",p.mergids],
+            ["Overpass",p.step],["Nominal offset (h)",p.dt_h],
+            ["Median detection offset (h)",p.det_dt_h]])}</table>`);}
+      }).addTo(nb2Layer);
+    }
+  }
+}
+
+// ---- matched-fire-v3 extras: same 3 overlays as v2, but a single result per event -
+// no radius/method to filter by, and the search circle radius VARIES per event (each
+// one already carries its own resolved `v3_search_radius_km`, unlike v2's global slider).
+let nb3Layer = null;
+function rebuildNb3(){
+  if (nb3Layer){ map.removeLayer(nb3Layer); nb3Layer = null; }
+  if (PCB_POS !== "fire3" || (!SHOW_NB3_CIRCLE && !SHOW_NB3_FIRE && !SHOW_NB3_ARROW)) return;
+
+  const shown = new Set();
+  for (const y of Object.keys(cache)){
+    if (!activeYears.has(+y)) continue;
+    const c = cache[y];
+    c.pcb && c.pcb.eachLayer(l => { if (pcbShown(l.feature)) shown.add(l.feature.properties.pcb_id); });
+  }
+  if (!shown.size) return;
+
+  nb3Layer = L.layerGroup().addTo(map);
+
+  if (SHOW_NB3_CIRCLE){
+    for (const y of Object.keys(cache)){
+      if (!activeYears.has(+y)) continue;
+      cache[y].pcb.eachLayer(l => {
+        const p = l.feature.properties, g = l.feature.geometry.coordinates;
+        if (!shown.has(p.pcb_id) || p.v3_lat == null) return;
+        // Centred on the AS-REPORTED point (same convention as v2's circle): that is
+        // where the ladder search actually ran outward from.
+        L.circle([g[1], g[0]], {
+          radius: p.v3_search_radius_km * 1000, pane:"nb3", renderer:R.nb3,
+          color:"#15803d", weight:1.5, dashArray:"4 4", fill:false, interactive:false,
+        }).addTo(nb3Layer);
+      });
+    }
+  }
+
+  if (SHOW_NB3_ARROW){
+    for (const y of Object.keys(cache)){
+      if (!activeYears.has(+y)) continue;
+      cache[y].pcb.eachLayer(l => {
+        const p = l.feature.properties, g = l.feature.geometry.coordinates;
+        if (!shown.has(p.pcb_id) || p.v3_lat == null) return;
+        const from = [g[1], g[0]], to = [p.v3_lat, p.v3_lon];
+        if (from[0] === to[0] && from[1] === to[1]) return;   // nothing to draw
+        L.polyline([from, to], {pane:"nb3", renderer:R.nb3, color:"#15803d",
+          weight:2, opacity:0.85, interactive:false}).addTo(nb3Layer);
+        const brg = bearingDeg(from[0], from[1], to[0], to[1]);
+        L.marker(to, {pane:"nb3", interactive:false, icon:L.divIcon({className:"",
+          iconSize:[14,14], iconAnchor:[7,7],
+          html:`<div style="width:0;height:0;border-left:6px solid transparent;`
+            +`border-right:6px solid transparent;border-bottom:11px solid #15803d;`
+            +`transform:rotate(${brg}deg);transform-origin:50% 70%"></div>`,
+        })}).addTo(nb3Layer);
+      });
+    }
+  }
+
+  if (SHOW_NB3_FIRE){
+    for (const y of Object.keys(cache)){
+      if (!activeYears.has(+y)) continue;
+      const feats = (cache[y].nb3raw.features || []).filter(f => shown.has(f.properties.pcb_id));
+      if (!feats.length) continue;
+      L.geoJSON({type:"FeatureCollection", features:feats}, {
+        pane:"nb3", renderer:R.nb3,
+        style: () => ({color:"#15803d", weight:1, fillColor:"#4ade80", fillOpacity:0.55}),
+        onEachFeature:(ft,l)=>{const p=ft.properties;
+          l.bindPopup(`<b>Matched fire v3</b> &middot; ${esc(p.pcb_id)}<table>${rows([
+            ["mergid",p.mergid],["Search radius (km)",p.search_radius_km],
+            ["Onset&rarr;snapshot (h)",p.match_dt_h],["Distance (km)",p.match_dist_km],
+            ["Actively burning (km²)",p.active_area_km2],
+            ["VIIRS detections",p.active_n_pixels],
+            ["Median detection offset (h)",p.active_det_dt_h],
+            ["Cumulative burn in buffer (km²)",p.clip_area_km2],
+            ["Fires in buffer",p.n_fires_in_buffer]])}</table>`);}
+      }).addTo(nb3Layer);
+    }
+  }
+}
+
+let nb4Layer = null;
+function rebuildNb4(){
+  if (nb4Layer){ map.removeLayer(nb4Layer); nb4Layer = null; }
+  if (PCB_POS !== "fire4" || (!SHOW_NB4_CIRCLE && !SHOW_NB4_FIRE && !SHOW_NB4_ARROW)) return;
+
+  const shown = new Set();
+  for (const y of Object.keys(cache)){
+    if (!activeYears.has(+y)) continue;
+    const c = cache[y];
+    c.pcb && c.pcb.eachLayer(l => { if (pcbShown(l.feature)) shown.add(l.feature.properties.pcb_id); });
+  }
+  if (!shown.size) return;
+
+  nb4Layer = L.layerGroup().addTo(map);
+
+  if (SHOW_NB4_CIRCLE){
+    for (const y of Object.keys(cache)){
+      if (!activeYears.has(+y)) continue;
+      cache[y].pcb.eachLayer(l => {
+        const p = l.feature.properties, g = l.feature.geometry.coordinates;
+        if (!shown.has(p.pcb_id) || p.v4_lat == null) return;
+        // v4 pools its pixels from the SAME ladder buffer v3 resolved, so the circle
+        // is the same radius - what differs is how the pixels inside it are weighted.
+        L.circle([g[1], g[0]], {
+          radius: p.v3_search_radius_km * 1000, pane:"nb4", renderer:R.nb4,
+          color:"#b45309", weight:1.5, dashArray:"4 4", fill:false, interactive:false,
+        }).addTo(nb4Layer);
+      });
+    }
+  }
+
+  if (SHOW_NB4_ARROW){
+    for (const y of Object.keys(cache)){
+      if (!activeYears.has(+y)) continue;
+      cache[y].pcb.eachLayer(l => {
+        const p = l.feature.properties, g = l.feature.geometry.coordinates;
+        if (!shown.has(p.pcb_id) || p.v4_lat == null) return;
+        const from = [g[1], g[0]], to = [p.v4_lat, p.v4_lon];
+        if (from[0] === to[0] && from[1] === to[1]) return;
+        L.polyline([from, to], {pane:"nb4", renderer:R.nb4, color:"#b45309",
+          weight:2, opacity:0.85, interactive:false}).addTo(nb4Layer);
+        const brg = bearingDeg(from[0], from[1], to[0], to[1]);
+        L.marker(to, {pane:"nb4", interactive:false, icon:L.divIcon({className:"",
+          iconSize:[14,14], iconAnchor:[7,7],
+          html:`<div style="width:0;height:0;border-left:6px solid transparent;`
+            +`border-right:6px solid transparent;border-bottom:11px solid #b45309;`
+            +`transform:rotate(${brg}deg);transform-origin:50% 70%"></div>`,
+        })}).addTo(nb4Layer);
+      });
+    }
+  }
+
+  if (SHOW_NB4_FIRE){
+    for (const y of Object.keys(cache)){
+      if (!activeYears.has(+y)) continue;
+      const feats = (cache[y].nb4raw.features || []).filter(f => shown.has(f.properties.pcb_id));
+      if (!feats.length) continue;
+      L.geoJSON({type:"FeatureCollection", features:feats}, {
+        pane:"nb4", renderer:R.nb4,
+        style: () => ({color:"#b45309", weight:1, fillColor:"#fbbf24", fillOpacity:0.55}),
+        onEachFeature:(ft,l)=>{const p=ft.properties;
+          l.bindPopup(`<b>Matched fire v4</b> &middot; ${esc(p.pcb_id)}<table>${rows([
+            ["mergid",p.mergid],["Search radius (km)",p.search_radius_km],
+            ["Actively burning (km²)",p.v4_area_km2],
+            ["VIIRS detections",p.v4_n_pixels],
+            ["Overpasses pooled",p.v4_n_steps_used],["Overpasses",p.v4_steps],
+            ["Median detection offset (h)",p.v4_det_dt_h]])}</table>`);}
+      }).addTo(nb4Layer);
+    }
   }
 }
 
@@ -1963,7 +2746,8 @@ function applyFilters(){
       else if (l.setStyle) l.setStyle({opacity: off?0:1, fillOpacity: off?0:1});
     }));
   }
-  if (errLayer) repositionPcb();
+  if (errLayer || SHOW_NB2_CIRCLE || SHOW_NB2_FIRE || SHOW_NB3_CIRCLE || SHOW_NB3_FIRE
+      || SHOW_NB4_CIRCLE || SHOW_NB4_FIRE) repositionPcb();
 }
 
 function gStop(){ if (gReq){ cancelAnimationFrame(gReq); gReq = null; } gLastTs = 0;
@@ -2068,6 +2852,9 @@ HTML = (HTML.replace("__DATA__", DATA_JS).replace("__YEARS__", YEARS_JS)
             .replace("__COLORS__", COLORS_JS).replace("__RAMP__", RAMP_JS)
             .replace("__SPREADCLAMP__", SPREAD_CLAMP_JS).replace("__MONTHCOUNTS__", MONTH_COUNTS_JS)
             .replace("__SEARCH__", SEARCH_JS).replace("__REGIONS__", REGIONS_JS)
+            .replace("__NEARBYRADII__", NEARBY_RADII_JS)
+            .replace("__NEARBYMETHODS__", NEARBY_METHODS_JS)
+            .replace("__NEARBYMETHODLABEL__", NEARBY_METHOD_LABEL_JS)
             .replace("__DOY0__", str(DOY_RANGE[0])).replace("__DOY1__", str(DOY_RANGE[1]))
             .replace("__ORPHAN__", str(int(C.MATCH_CAP_KM)))
             .replace("__Y0__", str(YEARS[0])).replace("__Y1__", str(YEARS[-1])))

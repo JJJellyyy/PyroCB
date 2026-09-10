@@ -144,12 +144,12 @@ def landcover_layer(year: int, geoms_3979) -> gpd.GeoDataFrame:
     return diss.to_crs(C.WGS84)
 
 
-def active_fractions(year: int, ids, geoms_3979) -> pd.DataFrame:
+def active_fractions(year: int, ids, geoms_3979, n_top: int = 3) -> pd.DataFrame:
     """Per pyroCb event, the land-cover composition of its active-burn polygon,
     sampled at the raster's native 30 m resolution.
 
-    Returns one row per id: top-3 class codes and their fractions of the classified
-    burn area, plus `lc_n_px` (30 m cells sampled).
+    Returns one row per id: top-`n_top` class codes and their fractions of the
+    classified burn area, plus `lc_n_px` (30 m cells sampled).
     """
     recs = []
     with rasterio.open(_tif(year)) as r:
@@ -166,7 +166,7 @@ def active_fractions(year: int, ids, geoms_3979) -> pd.DataFrame:
                 keep = np.array([c for c in LC_CLASSES if cnt[c] > 0])
                 tot = float(cnt[keep].sum()) if len(keep) else 0.0
                 if tot > 0:
-                    order = keep[np.argsort(cnt[keep])[::-1]][:3]
+                    order = keep[np.argsort(cnt[keep])[::-1]][:n_top]
                     rec["lc_n_px"] = int(tot)
                     for i, c in enumerate(order, 1):
                         rec[f"lc_top{i}_cls"] = int(c)

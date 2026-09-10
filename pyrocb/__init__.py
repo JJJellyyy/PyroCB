@@ -6,12 +6,13 @@ config      paths, constants, year resolution, the caching helper
 io          readers for the four products + the geometry validity pipeline
 timebins    half-day step handling and the 'snapshot before onset' rule
 matching    pyroCb event -> fire (mergid)
+nearby      matched fire v2: identity-free nearby-snapshot centroid
 bands       cumulative-union growth bands split at every pyroCb
 active      active-burn polygon at onset, from NFP pixel footprints
 variables   the per-event attribute table
 """
 from . import config, io, timebins  # noqa: F401
 
-__all__ = ["config", "io", "timebins", "matching", "bands", "variables",
+__all__ = ["config", "io", "timebins", "matching", "nearby", "bands", "variables",
            "active", "burngrid", "landcover", "lcraster", "firesim", "spread",
-           "pipeline"]
+           "satellite", "pipeline"]

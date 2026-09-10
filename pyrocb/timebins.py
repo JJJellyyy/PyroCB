@@ -113,6 +113,32 @@ def step_containing(onset_utc: pd.Timestamp, lon: float) -> str:
     return make_step(ld, "AM" if h < C.LOCAL_AM_END_H else "PM")
 
 
+def snapshot_offsets_h(onset_utc: pd.Timestamp, lon: float) -> tuple[float, float, float, float]:
+    """(b1_h, b2_h, a1_h, a2_h): nominal hours from onset to the 1st/2nd overpass
+    step before onset and the 1st/2nd strictly after, on the fixed AM/PM schedule -
+    independent of whether that step's file or detections actually exist (contrast
+    `pyrocb/nearby.py`'s `_walk_available`, which is this same walk gated on data
+    availability). b1/b2 are typically negative, a1/a2 positive, but see below.
+
+    Anchor is `step_containing`, and b1 IS the anchor (not `prev_step` of it) - the
+    same "anchor counts as the nearest before" convention `nearby.py`'s "before"
+    tiers use, so a map feature built on this and v2's `before`-method both mean the
+    same overpass by "1st before" for the same event. Most onsets fall after both
+    that day's AM and PM windows close (module docstring: onset peaks around local
+    15.0 h, past the 14.4 h blind-window boundary), so b1's NOMINAL time usually
+    precedes onset - but for an onset early in the PM window (local 7.1-13.0 h) b1's
+    nominal representative time (13.0 h) can fall slightly AFTER the actual onset.
+    That is the same coarse half-day approximation `nominal_utc`/`_dt_hours` already
+    carry everywhere else in this codebase, not a new one introduced here.
+    """
+    anchor = step_containing(onset_utc, lon)
+    b1, b2 = anchor, prev_step(anchor)
+    a1 = next_step(anchor)
+    a2 = next_step(a1)
+    to_h = lambda s: (nominal_utc(s, lon) - onset_utc).total_seconds() / 3600.0
+    return to_h(b1), to_h(b2), to_h(a1), to_h(a2)
+
+
 def step_before(onset_utc: pd.Timestamp, obs: pd.DataFrame | None, lon: float,
                 available: set[str] | None = None) -> tuple[str | None, str, float]:
     """Return (step, tier, obs_lag_h) for the last observation before `onset_utc`.
