@@ -254,6 +254,15 @@ GOES_DAYLIGHT_LOCAL_H  = (5.0, 21.0)
 GOES_MIN_DAYLIGHT_REFL = 0.05
 GOES_JPEG_QUALITY      = 82
 GOES_IMG_DIR           = str(ROOT / "cloud_images" / "{y}")
+# Time series around onset: one frame per offset, so the map can loop through the
+# pyroCb's own development instead of showing a single still. Offsets are hours from
+# onset; GOES_SERIES_TOL_H is how far from the requested offset a scene may sit and
+# still be accepted (full-disk cadence is ~10-15 min, so this is generous). Frames that
+# find nothing - usually the late ones, past local dusk - are simply absent, and the
+# map's player skips them rather than pretending the series is regular.
+GOES_SERIES_OFFSETS_H  = (-6.0, -4.0, -2.0, 0.0, 2.0, 4.0, 6.0)
+GOES_SERIES_TOL_H      = 1.0
+GOES_SERIES_PX         = 384          # smaller than the single still: 7x the files
 
 # ---------------------------------------------------------------- fire-activity grid
 # Both animation layers (the +/-24 h window and the whole-fire event) ship as a
@@ -270,9 +279,19 @@ GOES_IMG_DIR           = str(ROOT / "cloud_images" / "{y}")
 BURN_CELL_M = 375.0
 
 # Map scope. True -> the map carries only fires credited with a pyroCb (and their
-# ignitions), which is the analysis population; False -> every tracked fire, which is
-# ~170k polygons and a 27 MB file.
-MAP_ONLY_PCB_FIRES  = True
+# ignitions), which is the analysis population; False -> every tracked fire, shipped as
+# a togglable "All fire activity" layer (off by default in the UI). Measured cost of
+# False: ~4 MB gzip/year for perimeters+ignitions (most of it is a handful of huge
+# complexes - simplified/precision-snapped small-fire polygons cost almost nothing), so
+# the fear of "~170k polygons, 27 MB" from when this was last measured did not hold up.
+MAP_ONLY_PCB_FIRES  = False
+# A non-pyroCb fire needs at least this many VIIRS pixels to get a baked-in whole-fire
+# growth animation when someone clicks its ignition. Below it, an ignition still opens
+# the fire panel with basic stats, just no player - most of the ~170k tracked fires are
+# 1-5 pixel noise detections with no growth story to show. Cost is dominated by the
+# fires that already clear this bar regardless of threshold value (20 vs 50 pixels
+# changed 2023's payload by under 5%), so this is chosen for "worth animating", not size.
+ANIM_MIN_PIXELS     = 20
 # If fewer than this fraction of fires reproduce their n_pixels from the NFP id join,
 # the year's NFP labels are stale (2021) and pixels are re-attributed by geometry.
 NFP_ID_MIN_MATCH    = 0.95
@@ -290,7 +309,13 @@ YEAR_COLORS = {
     2016: "#3f9b45", 2017: "#7bab2e", 2018: "#c9a227", 2019: "#e08a1e",
     2020: "#e2660f", 2021: "#d1401f", 2022: "#b02020", 2023: "#7d1128",
 }
-DOY_RAMP = [YEAR_COLORS[y] for y in sorted(YEAR_COLORS)]
+# Magma. Sequential and perceptually uniform, so "later" reads as "brighter" without the
+# false category boundaries the old year-colour ramp implied (it was just the per-year
+# palette reused, which is qualitative). Drives day-of-burn colouring and the 12 h
+# snapshot growth bands; the animation's burn-age ramp (AGE_STOPS in the map) matches.
+DOY_RAMP = ["#000004", "#0c0927", "#231151", "#410f75", "#5f187f", "#7b2382",
+            "#982d80", "#b73779", "#d3436e", "#eb5760", "#f8765c", "#fd9668",
+            "#feb77e", "#fddc9e", "#fcfdbf"]
 # DOY_RANGE is fitted to the whole dataset at build time (see variables.doy_range),
 # so it extends automatically if 2026+ are added.  This is only the fallback.
 DOY_RANGE_FALLBACK = (90, 300)

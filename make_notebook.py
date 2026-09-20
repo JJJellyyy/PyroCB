@@ -901,8 +901,15 @@ const NEARBY_METHODS=__NEARBYMETHODS__;             // e.g. ["closest","before",
 const NEARBY_METHOD_LABEL=__NEARBYMETHODLABEL__;    // method key -> UI label
 const REGIONS=__REGIONS__;
 const MONTH_ABBR=["","Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-// day-of-year for the 1st of a given month (non-leap; fires are Mar-Oct so leap day is moot)
+// day-of-year for the 1st of a given month, non-leap
 const MONTH_DOY=[0,1,32,60,91,121,152,182,213,244,274,305,335,366];
+// Last day-of-year of month m in year y. The table above is non-leap, so from February
+// onward a leap year runs one day later. Without this the month animation's cursor
+// disagreed with its own tick counts (which come from the real calendar month): the two
+// 2016-06-30 events are doy 182, past the non-leap "end of June" of 181, so June showed
+// 2 fewer events than its tick claimed and they appeared under July instead.
+const isLeapYear = y => (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
+const monthEndDoy = (y, m) => MONTH_DOY[m + 1] - 1 + (m >= 2 && isLeapYear(y) ? 1 : 0);
 
 async function unpack(b64){
   const bin = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
@@ -1438,13 +1445,40 @@ function openInfoPanel(p){
     ? Date.parse(String(fsim.t0).replace(" ", "T") + "Z") : winAbsT0(p);
   const gridOf  = () => usesFire() ? fsim.g : byPcbPix[p.pcb_id];
   const curOf  = u => t0Of() + u * spanOf();
-  // Everything the map shows is a 12-hourly VIIRS overpass state, so snap the cursor
-  // to the 12 h grid (plus the exact pyroCb onset times, which are worth landing on).
+  // Snap the cursor to the grid's REAL distinct detection times, plus the pyroCb
+  // onsets and both endpoints.
+  //
+  // This used to snap to a synthetic 12 h lattice counted from the fire's own first
+  // detection, on the assumption that "everything the map shows is a 12-hourly VIIRS
+  // overpass state". It isn't. VIIRS overpasses arrive in pairs ~1.7 h apart
+  // (consecutive orbits) a couple of times a day and drift against any fixed lattice,
+  // so detection times scatter right across the 12 h cell. A detection landing in the
+  // lattice's blind gap was then unreachable: with the 6 h sliding window, cells whose
+  // burn time sat more than 6 h before every cursor stop were drawn in CUMULATIVE but
+  // NEVER in sliding, at any cursor position. On fire 7913 (2023NA1) that hid 2427 of
+  // 3819 cells - 64% of the fire. The lattice also never reached the final partial
+  // step, so the last detections were unreachable in both modes.
+  //
+  // Snapping to the observed times makes every frame a real observed state, and
+  // guarantees every cell is visible at its own timestamp in any window width.
+  // Snap values are kept EXACT, not rounded: these are the same float32s the grid
+  // stores, and rounding one down by a hair puts the cell's own time just past the
+  // cursor, which is the bug this is fixing in miniature.
   const buildSnap = () => {
-    const t0 = t0Of(), sp = spanOf(), pts = [];
-    for (let h = t0; h <= t0 + sp + 1e-6; h += 12) pts.push(Math.min(t0 + sp, h));
-    if (usesFire()) fsim.pcb_h.forEach(h => { if (h >= t0 && h <= t0+sp) pts.push(h); });
-    snapPts = [...new Set(pts.map(v => +v.toFixed(3)))].sort((a,b)=>a-b);
+    const t0 = t0Of(), sp = spanOf(), hi = t0 + sp;
+    const seen = new Set([t0, hi]);
+    const g = decodeGrid(gridOf());
+    if (g && g.n){                       // g.t is ascending, so dedupe in one pass
+      let prev = NaN;
+      for (let k = 0; k < g.n; k++){
+        const v = g.t[k];
+        if (v === prev) continue;
+        prev = v;
+        if (v >= t0 && v <= hi) seen.add(v);
+      }
+    }
+    if (usesFire()) fsim.pcb_h.forEach(h => { if (h >= t0 && h <= hi) seen.add(h); });
+    snapPts = [...seen].sort((a, b) => a - b);
   };
   const snapCur = v => {
     if (!snapPts.length) return v;
@@ -2820,7 +2854,7 @@ function _gRender(){
   } else {
     const y = animYear(), mc = monthCounts(y), m = MONTH_LO + i;
     const done = m > MONTH_HI;
-    dateFilterDoy = done ? null : (MONTH_DOY[m + 1] - 1);
+    dateFilterDoy = done ? null : monthEndDoy(y, m);
     applyFilters();
     let cum = 0; for (let k = MONTH_LO; k <= Math.min(m, MONTH_HI); k++) cum += mc[k];
     glabel.textContent = done ? "whole of " + y : MONTH_ABBR[m] + " " + y;

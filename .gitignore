@@ -29,6 +29,9 @@ __pycache__/
 .ipynb_checkpoints/
 .venv/
 venv/
+# Resumability cache for regen_goes_series.py - rebuilds from the STAC API, not ours.
+goes_series_cache.json
+regen_goes_series.log
 
 # ---- scratch ----------------------------------------------------------
 _nb_run.py
@@ -41,3 +44,6 @@ nohup.out
 # ---- OS -------------------------------------------------------------------
 .DS_Store
 Thumbs.db
+
+.vercel
+.deploy_tmp/

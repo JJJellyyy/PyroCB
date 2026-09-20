@@ -138,6 +138,52 @@ def event_images(year: int, events: pd.DataFrame, out_dir: str, verbose: bool = 
     return out
 
 
+def event_series(year: int, events: pd.DataFrame, out_dir: str, verbose: bool = True) -> dict:
+    """{pcb_id: {"frames": [...]}} - one GOES frame per C.GOES_SERIES_OFFSETS_H.
+
+    The single still `event_images` produces answers "what did the pyroCb look like?";
+    this answers "how did it develop?", which is the thing worth looping. Each frame is
+    the daylight scene nearest onset+offset, rendered exactly like the still (same
+    circle crop, same markers) so the frames differ only by time, and written as its
+    own JPEG next to the still. Frames with no usable scene are dropped, not faked -
+    the late ones routinely fall past local dusk.
+    """
+    if year < C.GOES_MIN_YEAR:
+        return {}
+    sub = events[~events["region"].isin(C.GOES_EXCLUDE_REGIONS)].copy()
+    if not len(sub):
+        return {}
+    os.makedirs(out_dir, exist_ok=True)
+
+    cat = pystac_client.Client.open(_STAC_URL, modifier=pc.sign_inplace)
+    out: dict[str, dict] = {}
+    for i, r in enumerate(sub.itertuples(), 1):
+        bbox = _bbox_wgs84(r.lat, r.lon, C.GOES_RADIUS_KM)
+        markers, stars = _collect_markers(r)
+        onset = pd.Timestamp(r.datetime)
+        frames = []
+        for off in C.GOES_SERIES_OFFSETS_H:
+            tag = f"{'m' if off < 0 else 'p'}{abs(off):g}".replace(".", "_")
+            path = os.path.join(out_dir, f"{r.pcb_id}_goes_{tag}.jpg")
+            cands = _series_candidates(cat, bbox, onset + pd.Timedelta(hours=off), float(r.lon))
+            if not cands:
+                continue
+            meta = _build_image(cat, r.lat, r.lon, markers, stars, bbox, float(r.lon),
+                                onset, path, candidates=cands, out_px=C.GOES_SERIES_PX)
+            if meta:
+                meta["offset_h"] = float(off)
+                frames.append(meta)
+        if frames:
+            out[r.pcb_id] = {"frames": frames}
+        if verbose:
+            print(f"    goes-series {i}/{len(sub)} {r.pcb_id}: {len(frames)}/"
+                  f"{len(C.GOES_SERIES_OFFSETS_H)} frames", flush=True)
+    if verbose:
+        n_fr = sum(len(v["frames"]) for v in out.values())
+        print(f"  {year}: GOES series for {len(out)}/{len(sub)} events, {n_fr} frames", flush=True)
+    return out
+
+
 def _bbox_wgs84(lat: float, lon: float, radius_km: float):
     """WGS84 bounds of a circle, computed via the equal-area METRIC_CRS so `radius_km`
     is a true ground distance (a plain lat/lon box would distort badly this far north)."""
@@ -197,14 +243,36 @@ def _candidate_scenes(cat, bbox, t_onset: pd.Timestamp, lon: float):
     return out
 
 
+def _series_candidates(cat, bbox, t_target: pd.Timestamp, lon: float):
+    """Daylight FULL DISK scenes within GOES_SERIES_TOL_H of `t_target`, CLOSEST first.
+
+    Same daylight pre-filter as `_candidate_scenes`, but anchored on an arbitrary
+    instant rather than "earliest after onset" - a time series wants the scene nearest
+    each requested offset, not the first usable one.
+    """
+    tol = pd.Timedelta(hours=C.GOES_SERIES_TOL_H)
+    items = list(cat.search(collections=[_COLLECTION], bbox=list(bbox),
+                            datetime=f"{(t_target - tol).isoformat()}Z/{(t_target + tol).isoformat()}Z",
+                            query={"goes:image-type": {"eq": "FULL DISK"}}).items())
+    lo_h, hi_h = C.GOES_DAYLIGHT_LOCAL_H
+    out = []
+    for it in items:
+        scene_utc = pd.Timestamp(it.datetime).tz_convert("UTC").tz_localize(None)
+        if lo_h <= float(T.local_solar_hour(scene_utc, lon)) <= hi_h:
+            out.append((abs((scene_utc - t_target).total_seconds()), it))
+    out.sort(key=lambda p: p[0])
+    return [it for _, it in out]
+
+
 def _build_image(cat, cen_lat: float, cen_lon: float, markers: list[dict], stars: dict,
-                 bbox_wgs84, lon: float, t_onset: pd.Timestamp, out_path: str):
+                 bbox_wgs84, lon: float, t_onset: pd.Timestamp, out_path: str,
+                 candidates=None, out_px=None):
     """Earliest daylight scene 2-12 h after onset, circle-cropped, marked up and
     written as a JPEG. `cen_lat/lon` is the AS-REPORTED point (D-69) - the fixed
     reference every marker is compared against, not a v2 result. `stars`
     (D-70, D-78) is {"v3": {"lat","lon"}|None, "v4": ...} - each present entry is
     one single-position match drawn as its own star."""
-    out_px = C.GOES_OUT_PX
+    out_px = out_px or C.GOES_OUT_PX
     star_keys = [k for k in ("v3", "v4") if stars.get(k) is not None]
     it = bx = win_transform = cen_px = star_px = marker_px = src_meta = data = None
 
@@ -220,7 +288,8 @@ def _build_image(cat, cen_lat: float, cen_lon: float, markers: list[dict], stars
     all_lon = [cen_lon] + [stars[k]["lon"] for k in star_keys] + [m["lon"] for m in markers]
     all_lat = [cen_lat] + [stars[k]["lat"] for k in star_keys] + [m["lat"] for m in markers]
     attempts = 0
-    for cand in _candidate_scenes(cat, bbox_wgs84, t_onset, lon):
+    for cand in (candidates if candidates is not None
+                 else _candidate_scenes(cat, bbox_wgs84, t_onset, lon)):
         attempts += 1
         if attempts > C.GOES_MAX_READ_ATTEMPTS:
             break

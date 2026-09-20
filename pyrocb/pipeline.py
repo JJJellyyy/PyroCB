@@ -295,7 +295,12 @@ def landcover_fractions_cached(year: int, active_gdf, events: pd.DataFrame) -> p
 
 
 def firesim_cached(year: int, events: pd.DataFrame, linked) -> dict:
-    """{str(mergid): whole-fire evolution payload} for the year's pyroCb fires.
+    """{str(mergid): whole-fire evolution payload} for the year's animation-eligible
+    fires: every pyroCb-linked fire (real onset list, drives the pop-in stars/dots), plus
+    every OTHER fire with at least `C.ANIM_MIN_PIXELS` VIIRS detections (empty onset
+    list - still gets the growth grid, just no pyroCb beats during playback). That
+    second group is what lets the map's "All fire activity" layer open a real animation
+    from a fire that never made a pyroCb, selected by clicking its ignition.
 
     Returns a plain dict (not a frame), so it uses a small JSON cache keyed on the
     firesim params, the pyroCb onsets and the NFP file stamps. v2 added ign_h/ign_ix/
@@ -311,7 +316,12 @@ def firesim_cached(year: int, events: pd.DataFrame, linked) -> dict:
              "lon": float(r.lon), "id": str(r.pcb_id),
              "ix": int(r.pcb_index) if pd.notna(r.pcb_index) else None}
             for r in g.sort_values("datetime").itertuples()]
-    return _json_cached("firesim", year, {"cell": C.BURN_CELL_M, "onsets": onsets, "v": 2},
+    fin = io.read_final(year)
+    extra = set(fin.loc[fin["n_pixels"] >= C.ANIM_MIN_PIXELS, "mergid"].astype(int)) - linked
+    for m in extra:
+        onsets[int(m)] = []
+    return _json_cached("firesim", year,
+                        {"cell": C.BURN_CELL_M, "onsets": onsets, "v": 3},
                         _inputs(year), lambda: FS.fire_series(year, onsets))
 
 

@@ -14,6 +14,8 @@ base64 for 2023.
 """
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pandas as pd
 
@@ -68,7 +70,11 @@ def fire_series(year: int, onsets: dict) -> dict:
 
         out[str(int(mergid))] = {
             "t0": pd.Timestamp(t0).strftime("%Y-%m-%d %H:%M"),
-            "dur_h": round(float(mins.max()) / 60.0, 1),
+            # Ceil, never round: dur_h is the span of the map's scrubber, so rounding
+            # DOWN leaves the fire's final detections past the end of its own timeline,
+            # unreachable in cumulative and sliding alike. 20 of 69 fires in 2023 lost
+            # their last cells that way.
+            "dur_h": math.ceil(float(mins.max()) / 6.0) / 10.0,
             "pcb_h": ons_h,
             "pcb_ix": [o.get("ix") for o in ons],
             "pcb_ll": [[round(float(o["lat"]), 4), round(float(o["lon"]), 4)] for o in ons],

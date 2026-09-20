@@ -389,6 +389,45 @@ walk through many darkening candidates before `GOES_DAYLIGHT_LOCAL_H`/
 caps the candidate-scene loop in `_build_image()` so one bad event can't blow up the whole
 rebuild's runtime. The scene that wins when found well inside the cap is unaffected.
 
+### D-85 — PCB_MATCHING_CLEAN's stage-3 analysis polygon: exactly the nearest-before + nearest-after image, not a pooled +/-12h window
+Audited `PCB_MATCHING_CLEAN.ipynb`'s v4 implementation (`v4_burn`) against D-77's spec — 4
+time-closest overpasses, per-pixel `exp(-|dt|/12h)` weight on the real `datetime_utc`, divided
+by that step's own pixel count — and it matches exactly; that part was untouched. What changed
+is stage 3 (the analysis polygon itself, shared by v3 and v4): it used to take whichever pixels
+stage 1/2 had already loaded (v3's single matched overpass, or v4's pooled up-to-4) and keep
+whatever fell within `ANALYSIS_RADIUS_KM` (5 km) **and** `ANALYSIS_TIME_CAP_H` (±12 h) of the
+corrected centre. Per spec: buffer 5 km around the corrected coordinate, then independently find
+the two overpasses that actually bracket onset — the nearest at-or-before and the nearest after
+(`closest_before_after`, a new helper distinct from the ladder's `closest_two_steps`, which picks
+by `abs(dt_h)` regardless of sign and can return two candidates on the same side) — and union
+every actively-burning pixel from those two specific images that falls in the buffer. No
+additional time cap: picking exactly the bracketing pair already answers "how far in time", so a
+further ±12 h cutoff would either be redundant or (in a sparse stretch) discard the nearest look
+there is for no reason. `onset_active_polygon()` is one function called from both `active_burn`
+(v3) and `v4_burn`, so "the analysis polygon" means the same construction for both, differing
+only in which stage-2 coordinate it re-centres on. Re-run over all 484 events: 386/395 matched
+events get a polygon (9 fall back — no detections at either candidate), 292 use both
+before+after images, 94 use only one side (a blow-up fire has no before-image, F4). Output
+column names (`active_area_km2`, `v4_area_km2`, etc.) are unchanged — only the pixel-selection
+rule inside them — so the map's existing `v3_gdf`/`v4_gdf` column reads did not need updating.
+**Rejected:** keeping the ±12h cap alongside the new two-image rule — redundant once the
+image pair is chosen deliberately rather than pooled, and it would silently drop the very look
+the spec asks for whenever a data gap pushed one side past 12 h.
+
+### D-86 — PCB_MATCHING_CLEAN restructured to two setup cells; no project root
+Reorganised `make_pcb_matching_clean_notebook.py`'s output into exactly two setup cells —
+**Setup** (external packages only) and **Helper functions** (every constant, path template and
+function the rest of the notebook calls, in one cell) — followed purely by execution cells; no
+code cell after the helpers cell defines a new function. Previously the function definitions
+were spread across ~8 cells interleaved with narrative markdown (one per algorithm step), which
+made "is this notebook actually standalone/complete" harder to audit at a glance than the two-
+cell structure the user asked for. Also dropped the `ROOT = Path.cwd()` indirection entirely —
+`SNAP_DIR`/`NFP_DIR`/`XLSX_FP` are now plain relative strings (`"{y}/{y}/Snapshot"` etc.),
+resolved against whatever directory the notebook is actually run from, with no project-root
+concept anywhere in the file. Pure refactor: re-run over all 484 events reproduced the exact
+same numbers as before (386/395 matched with a polygon, 292/94 before+after split, identical
+medians), confirming nothing behavioural moved along with the code.
+
 ---
 
 ## The analysis polygon
