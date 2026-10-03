@@ -1,4 +1,7 @@
-"""Simplified land cover over each fire perimeter and a 5 km collar.
+"""[Superseded for the map by Copernicus C3S - see build_c3s_landcover.py, DECISIONS D-87 and
+FINDINGS F15. Kept because make_notebook.py's attribute table still uses it.]
+
+Simplified land cover over each fire perimeter and a 5 km collar.
 
 Source: the 30 m *Land Cover of Canada* rasters (EPSG:3979), 2015 collection for
 2013-2017 and 2020 collection for 2018-2023 (`LC_YEAR_SPLIT`). Per fire we read the

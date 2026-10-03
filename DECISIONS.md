@@ -428,6 +428,78 @@ concept anywhere in the file. Pure refactor: re-run over all 484 events reproduc
 same numbers as before (386/395 matched with a polygon, 292/94 before+after split, identical
 medians), confirming nothing behavioural moved along with the code.
 
+### D-87 — Map land cover is Copernicus C3S, not Land Cover of Canada (F15)
+The map's land-cover overlay, the per-pyroCb "land cover under the active burn" mix and the
+pixel variables now all use Copernicus C3S (300 m, annual, `PCB_Analysis_1/INPUT_DATA/
+LANDCOVER_C3S/lccs_class_{year}.tif`), grouped into pixels.parquet's 10 `lc_group` fuel classes
+(+ water on the overlay). `build_c3s_landcover.py` rebuilds the overlays for every pyroCb-linked
+fire worldwide (the Canada product covered Canadian fires only) and recomputes `lc_top{1..5}`
+from the C3S class at each active 375 m cell in the 6 h before onset (first 6 h after for a
+blow-up) — the same footprint definition as before. The Canada 10 km polygon backdrop is gone.
+`pyrocb/landcover.py` / `lcraster.py` (Canada) are no longer used by the map; the attribute
+table built by `make_notebook.py` still carries their columns until that pipeline is rerun.
+**Rejected:** keeping Canada for Canadian fires and C3S elsewhere — two class systems on one
+map, and the Canada one describes the burn scar for half the years (F15).
+
+### D-88 — One colour direction for every continuous quantity
+Burn age, overpass-step spread/FRP, day of year, year, pixel variables and fire-level means all
+use one ramp: **low = pale yellow, high = dark purple** (viridis reversed; later in time counts
+as higher). Quantities that run both ways about zero (slope along spread, TPI, elevation gain)
+use blue (negative) – white – red (positive). Every key reads low → high, left → right. Before
+this, burn age ran dark → light, spread/FRP yellow → red, and pixel variables purple → yellow,
+so "dark" meant high in one mode and low in the next.
+
+### D-89 — Static window reaches the 3rd and 4th overpass before onset
+Each pyroCb's detection grid now spans −72 h … +24 h (was ±24 h; `build_pix_wide.py`, same
+localisation as `active.slider_data`), and `snap_b3_h` / `snap_b4_h` come from
+`timebins.snapshot_pre_offsets_h` — the same nominal half-day schedule as b1/b2 (asserted
+equal for those). The 3rd/4th overpass is 24–48 h before onset, outside the old grid.
+
+### D-90 — The animation is whole-fire only; one "Colour by" control
+The ±24 h animation scope is removed (the Static tab already shows the event window). Burn
+age, the 12-hourly step attributes and the per-pixel variables are one dropdown instead of a
+button row plus a separate pixel-variable select — they all answer "what colour is this cell".
+
+### D-91 — GOES cloud imagery hidden, code kept
+`SHOW_GOES = false` hides the GOES panel; the player code and the `goes`/`goesq` payloads stay,
+so turning it back on is one flag (plus deploying `cloud_images/` again).
+
+### D-92 — Field-standard colour ramps; time follows the published burn-date figure (supersedes D-88's palette)
+Temporal quantities use the scheme of the reference figure the project follows: **years** are
+RdYlBu reversed (2013 dark blue → 2023 dark red), **burn age, day of year and snapshot growth**
+are magma (dark = early → pale = late, "day of burn"). Everything else uses the ramp standard
+for its kind, high always at the strong end: FRP and spread rate YlOrRd; elevation a
+hypsometric tint (green → brown → white); slope and roughness YlOrBr; signed terrain (TPI,
+slope along spread, elevation gain) BrBG about zero (teal below, brown above); vegetation
+fractions Greens; land-cover diversity viridis; land cover keeps its categorical palette.
+D-88's rule that keys read low → high (early → late), left → right still holds.
+
+### D-93 — Every pixels.parquet feature on the map: one file per variable, 4-bit, with its dictionary
+All 155 features of `pixel_variable_dictionary.csv` (everything not flagged "not a feature") are
+shipped, not a curated 18. Each variable is its own file per year (`pixattr/v/{col}/`), so the
+browser fetches only the variable that is picked. Per-cell values are 4-bit (16 colour steps),
+a deliberate downscale for display: patterns stay visible and size drops ~40 % against 8-bit.
+Measured before choosing: re-ordering cells spatially (Morton order, with and without delta
+coding) gained nothing (47.1 vs 47.2 MB for 2021), so the values are close to incompressible at
+375 m and cells stay in grid order. Fire-level means are one uint8 per fire per variable
+(`pixattr/f/`). The dictionary's definition / calculation / source / caveats ship in
+`meta.json` and are shown by the (i) buttons and the "Variable reference" panel. Ramps follow
+D-92, extended: change and direction variables (Δ along path, fuel change ahead, spread and
+aspect components) use RdBu about zero; non-fuel share Greys; scan geometry viridis.
+
+### D-94 — Spread direction is one variable, drawn as arrows
+`spread_ux` / `spread_uy` are the two components of one vector, and a colour per component says
+little. They are merged into `spread_bearing`: the true bearing (deg clockwise from north) of the
+unit spread vector, rotated out of the EPSG:3571 grid frame by projecting both ends to lon/lat and
+taking the geodesic azimuth. Checked against the bearing from each pixel's predecessor to the
+pixel itself (2021, 20 000 pixels moving > 1 km): median error 0.02 deg, max 0.6 deg; reading the
+grid components as if y were north would have been off by a median 62 deg. Stored at 8 bits
+(1.4 deg steps) rather than 4 - direction needs the precision. The map draws it like a wind field:
+cells are binned on a 22 px screen grid (one cell per arrow when zoomed in further), each bin gets
+one arrow along its cells' mean unit vector, longer the more consistent they are, coloured by
+their mean spread rate (YlOrRd), over a faint grey footprint. Web Mercator is conformal, so the
+true bearing is also the on-screen angle. No fire-level mean (a whole fire has no one direction).
+
 ---
 
 ## The analysis polygon

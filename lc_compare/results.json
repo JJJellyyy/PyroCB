@@ -1,0 +1,98 @@
+{
+ "n": 20000,
+ "overall_agreement": 0.47155,
+ "forest_vs_nonforest_agreement": 0.5798,
+ "per_class": {
+  "Needleleaf": {
+   "canada_n": 8528,
+   "c3s_n": 14948,
+   "both": 7748,
+   "share_canada": 0.4264,
+   "share_c3s": 0.7474,
+   "c3s_agrees_when_canada_is_class": 0.9085365853658537
+  },
+  "Broadleaf deciduous": {
+   "canada_n": 221,
+   "c3s_n": 298,
+   "both": 70,
+   "share_canada": 0.01105,
+   "share_c3s": 0.0149,
+   "c3s_agrees_when_canada_is_class": 0.3167420814479638
+  },
+  "Mixed": {
+   "canada_n": 549,
+   "c3s_n": 1346,
+   "both": 175,
+   "share_canada": 0.02745,
+   "share_c3s": 0.0673,
+   "c3s_agrees_when_canada_is_class": 0.31876138433515483
+  },
+  "Shrub": {
+   "canada_n": 1319,
+   "c3s_n": 918,
+   "both": 168,
+   "share_canada": 0.06595,
+   "share_c3s": 0.0459,
+   "c3s_agrees_when_canada_is_class": 0.12736921910538287
+  },
+  "Grass/herb": {
+   "canada_n": 6126,
+   "c3s_n": 157,
+   "both": 89,
+   "share_canada": 0.3063,
+   "share_c3s": 0.00785,
+   "c3s_agrees_when_canada_is_class": 0.014528240287300032
+  },
+  "Lichen/sparse": {
+   "canada_n": 164,
+   "c3s_n": 602,
+   "both": 43,
+   "share_canada": 0.0082,
+   "share_c3s": 0.0301,
+   "c3s_agrees_when_canada_is_class": 0.2621951219512195
+  },
+  "Wetland": {
+   "canada_n": 1578,
+   "c3s_n": 275,
+   "both": 134,
+   "share_canada": 0.0789,
+   "share_c3s": 0.01375,
+   "c3s_agrees_when_canada_is_class": 0.08491761723700887
+  },
+  "Cropland": {
+   "canada_n": 280,
+   "c3s_n": 322,
+   "both": 250,
+   "share_canada": 0.014,
+   "share_c3s": 0.0161,
+   "c3s_agrees_when_canada_is_class": 0.8928571428571429
+  },
+  "Non-fuel": {
+   "canada_n": 1235,
+   "c3s_n": 1134,
+   "both": 754,
+   "share_canada": 0.06175,
+   "share_c3s": 0.0567,
+   "c3s_agrees_when_canada_is_class": 0.6105263157894737
+  }
+ },
+ "agreement_canada_vs_c3s_same_year": {
+  "fire_not_after_map_epoch": 0.34755427895581653,
+  "fire_after_map_epoch": 0.6513536689942423
+ },
+ "agreement_canada_vs_c3s_prefire_year": 0.4725,
+ "agreement_c3s_same_year_vs_prefire_year": 0.9951,
+ "by_year_agreement": {
+  "2013": 0.19747520288548243,
+  "2014": 0.3239496694391128,
+  "2015": 0.5555911566805511,
+  "2016": 0.6978335233751425,
+  "2017": 0.7244789826916284,
+  "2018": 0.30067567567567566,
+  "2019": 0.2554945054945055,
+  "2020": 0.55,
+  "2021": 0.6970684039087948,
+  "2022": 0.7213114754098361,
+  "2023": 0.5673076923076923
+ }
+}

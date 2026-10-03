@@ -1,4 +1,7 @@
-"""Land cover as paletted PNG overlays, one per fire.
+"""[Superseded for the map by Copernicus C3S - see build_c3s_landcover.py, DECISIONS D-87 and
+FINDINGS F15. Kept because make_notebook.py's attribute table still uses it.]
+
+Land cover as paletted PNG overlays, one per fire.
 
 The polygon route hit a wall (D-39): true 30 m vector land cover over every pyroCb
 perimeter is ~14 MB compressed for 2023 alone, and even the 1 km tier costs thousands

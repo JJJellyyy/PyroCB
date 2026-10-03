@@ -66,6 +66,20 @@ landcover-YYYY-classification.tif                   30 m Canada land cover
 
 Attribute definitions: `fireatlas_attribute_table_v1.pdf`, `PCB readme.pdf`.
 
+## Editing the map
+
+`fire_pcb_map.html` is one 47 MB file. Edit its parts instead:
+
+```bash
+python map_tool.py split   # -> map_src/head.html (CSS + markup), tail.html (JS), data.json (payload)
+python map_tool.py join    # -> fire_pcb_map.html
+node map_check.js          # syntax-check the JS
+```
+
+Data builders write into `map_src/data.json` or `pixattr/`: `build_c3s_landcover.py` (land cover),
+`build_pix_wide.py` (pyroCb detection grids), `build_pixel_attrs.py` (pixel variables). Deploy
+the map with `pixattr/` and `sat_images/` next to it (it fetches them at runtime).
+
 ## Version control
 
 Git with **LFS** for `*.html`, `*.gpkg`, `*.xlsx`, `*.pdf` so the map (rebuilt often, ~10–26 MB)

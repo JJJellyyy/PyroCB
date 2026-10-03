@@ -218,6 +218,9 @@ def _read_nfp_raw(year: int) -> pd.DataFrame:
             frames.append(df)
         out = pd.concat(frames, ignore_index=True)
         out["datetime_utc"] = pd.to_datetime(out["datetime_utc"])
+        if year >= 2024:
+            # the extension release ships DS/DT swapped relative to the published atlas
+            out[["DS", "DT"]] = out[["DT", "DS"]].to_numpy()
         out["mergid"] = out["mergid"].astype("int64")
         for c in ("frp", "DS", "DT"):
             out[c] = out[c].astype("float32")
@@ -322,27 +325,24 @@ def nfp_obs_index(year: int) -> pd.DataFrame:
 
 # ---------------------------------------------------------------- pyroCb atlas
 def read_pcb() -> pd.DataFrame:
-    """The NRL pyroCb inventory, cleaned, with a stable `pcb_id`.
+    """The NRL pyroCb inventory (extended to 2025), Confirmed boreal events, stable `pcb_id`.
+
+    Delegates to `pcbcube.pcb.read_pcb` so the map and the tabular dataset share one inventory
+    and one id scheme (the original 484 ids are unchanged). Probable/Uncertain events are kept
+    out of the map as they are out of the labels.
 
     `lat`/`lon` are the APPROXIMATE FIRE location (readme Table 1), not the plume -
     but stored to 0.1 deg (~11 km), which sets a floor on match quality.
     """
     def build():
-        d = pd.read_excel(C.XLSX_FP, sheet_name=0)
-        d["datetime"] = pd.to_datetime(d["datetime"], errors="coerce")
-        d = d.dropna(subset=["datetime", "lat", "lon"]).copy()
-        d["year"] = d["datetime"].dt.year
-        d["doy"] = d["datetime"].dt.dayofyear
-        d = d.sort_values(["datetime", "lat", "lon"]).reset_index(drop=True)
-        # fire_name mixes ints (Quebec fires are numbered: 172, 260) with strings
-        # (EWF-031-2023); normalise every object column so the cache round-trips.
+        from pcbcube.pcb import read_pcb as _read
+        d = _read().sort_values(["datetime", "lat", "lon"]).reset_index(drop=True)
         for c in d.columns:
             if d[c].dtype == object:
                 d[c] = d[c].astype("string")
-        d["pcb_id"] = _make_pcb_ids(d)
         return d
 
-    return C.cached("pcb_clean", None, {"v": 2}, [C.XLSX_FP], build)
+    return C.cached("pcb_clean", None, {"v": 3}, [C.XLSX_FP], build)
 
 
 def _make_pcb_ids(d: pd.DataFrame) -> pd.Series:

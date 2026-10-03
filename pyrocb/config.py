@@ -11,23 +11,38 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+# The fire atlas, inventory and land-cover rasters live ONCE, in the parent project's INPUT_DATA
+# (PCB_Analysis_1/INPUT_DATA); this map project no longer keeps its own copies.
+DATA = ROOT.parent / "INPUT_DATA"
 
 # ---------------------------------------------------------------- scope
 # YEARS = None  ->  every year that has BOTH fire data on disk AND pyroCb records.
 #                   That is 2013-2023; 2012 drops out because the pyroCb inventory
 #                   does not cover it.
-YEARS: list[int] | None = None
+YEARS: list[int] | None = list(range(2013, 2024))   # pinned 2026-10-03: project is 2013-2023 (published atlas); 2024-25 kept on disk, 13-year map in map_backup_2013_2025/
 
 # Years for the heavy snapshot/NFP analysis (matching, bands, per-event variables).
 # None -> same as the resolved YEARS.
 SNAPSHOT_YEARS: list[int] | None = None
 
 # ---------------------------------------------------------------- paths
-PERIMS_TPL = str(ROOT / "final_perims" / "final_perims" / "final_viirs{y}.gpkg")
-IGN_TPL    = str(ROOT / "ignitions" / "ignitions" / "ign{y}.gpkg")
-SNAP_DIR   = str(ROOT / "{y}" / "{y}" / "Snapshot")
-NFP_DIR    = str(ROOT / "{y}" / "{y}" / "NFP")
-XLSX_FP    = ROOT / "PCBAtlas.xlsx"
+PERIMS_TPL = str(DATA / "VIIRS" / "final_perims" / "final_perims" / "final_viirs{y}.gpkg")
+IGN_TPL    = str(DATA / "VIIRS" / "ignitions" / "ignitions" / "ign{y}.gpkg")
+SNAP_DIR   = str(DATA / "VIIRS" / "{y}" / "{y}" / "Snapshot")
+NFP_DIR    = str(DATA / "VIIRS" / "{y}" / "{y}" / "NFP")
+# The pyroCb inventory is the parent project's extended one (2013-2025); the map reads it through
+# pcbcube.pcb so ids, the boreal filter and the Confirmed-only rule are the same as the dataset's.
+import sys as _sys
+_sys.path.insert(0, str(ROOT.parent))
+from pcbcube import config as _PC          # noqa: E402
+XLSX_FP    = Path(_PC.PCB_XLSX)
+XLSX_LEGACY = ROOT / "PCBAtlas.xlsx"       # the original 2013-2023 inventory (cache stamp for those years)
+
+
+def inventory_stamp(year: int) -> Path:
+    """File whose mtime/size invalidates a year's caches. The extension years follow the extended
+    inventory; 2013-2023 stay stamped with the original so their caches survive its extension."""
+    return XLSX_LEGACY if (year < _PC.EXT_FIRST_YEAR and XLSX_LEGACY.exists()) else XLSX_FP
 
 OUT_HTML   = ROOT / "fire_pcb_map.html"
 OUT_TSV    = ROOT / "pyrocb_fire_attributes.tsv"
@@ -153,8 +168,13 @@ ACTIVE_ATTACH_CAP_KM = 20.0
 # 30 m Land Cover of Canada (EPSG:3979). 2015 collection for the earlier fire
 # years, 2020 for LC_YEAR_SPLIT onward. Decimated to LC_CELL_M for the map layer;
 # the perimeter is grown by LC_BUFFER_M so the fire's surroundings are included.
-LC_TIF_2015   = str(ROOT / "landcover-2015-classification.tif")
-LC_TIF_2020   = str(ROOT / "landcover-2020-classification.tif")
+# Land cover is Copernicus C3S 300 m ONLY (user decision 2026-10-03), same product as the dataset's
+# lc_* columns. The map's C3S overlays and per-pyroCb class mix are written by build_c3s_landcover.py;
+# with LC_SOURCE = "c3s" the pipeline's old Land Cover of Canada (NALCMS 30 m) stages return empty, so
+# a regenerated year can never bring that product back. "nalcms" restores the old behaviour.
+LC_SOURCE     = "c3s"
+LC_TIF_2015   = str(DATA / "LANDCOVER" / "landcover-2015-classification.tif")
+LC_TIF_2020   = str(DATA / "LANDCOVER" / "landcover-2020-classification.tif")
 LC_YEAR_SPLIT = 2018
 LC_CELL_M     = 1000.0
 LC_BUFFER_M   = 5000.0
@@ -308,6 +328,7 @@ YEAR_COLORS = {
     2012: "#3b4cc0", 2013: "#5a78d0", 2014: "#7ba3dc", 2015: "#2a9d8f",
     2016: "#3f9b45", 2017: "#7bab2e", 2018: "#c9a227", 2019: "#e08a1e",
     2020: "#e2660f", 2021: "#d1401f", 2022: "#b02020", 2023: "#7d1128",
+    2024: "#5b1a4a", 2025: "#2d1b4e",     # extension years (the map re-spreads its own RdYlBu ramp over all years)
 }
 # Magma. Sequential and perceptually uniform, so "later" reads as "brighter" without the
 # false category boundaries the old year-colour ramp implied (it was just the per-year
@@ -357,14 +378,15 @@ def params_hash(params: dict) -> str:
 
 
 def _stamp(paths) -> list:
+    # by file NAME (not full path), so moving the project folder does not invalidate every cache
     out = []
     for p in paths:
         p = Path(p)
         try:
             st = p.stat()
-            out.append([str(p), int(st.st_mtime), st.st_size])
+            out.append([p.name, int(st.st_mtime), st.st_size])
         except OSError:
-            out.append([str(p), None, None])
+            out.append([p.name, None, None])
     return out
 
 

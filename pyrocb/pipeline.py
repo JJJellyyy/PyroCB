@@ -28,7 +28,7 @@ from . import variables as V
 def _inputs(year: int) -> list:
     """Files whose mtime/size invalidate a year's cached stages."""
     snaps = sorted(glob.glob(os.path.join(C.SNAP_DIR.format(y=year), "*.gpkg")))
-    return [C.XLSX_FP, C.PERIMS_TPL.format(y=year), C.IGN_TPL.format(y=year)] + snaps[:1] + snaps[-1:]
+    return [C.inventory_stamp(year), C.PERIMS_TPL.format(y=year), C.IGN_TPL.format(y=year)] + snaps[:1] + snaps[-1:]
 
 
 def match_cached(year: int) -> pd.DataFrame:
@@ -126,6 +126,8 @@ def active_cached(year: int, events: pd.DataFrame):
 def landcover_cached(year: int, mergids) -> "gpd.GeoDataFrame":
     """Coarse (10 km) land-cover polygon backdrop around the year's pyroCb fires.
     Everything closer in is a PNG overlay - see `lcpng_cached`."""
+    if C.LC_SOURCE == "c3s":                       # Copernicus only - see config.LC_SOURCE
+        return gpd.GeoDataFrame(geometry=[], crs=C.WGS84)
     mergids = sorted(int(m) for m in mergids)
     params = {"buf": C.LC_BUFFER_M, "bg_cell": C.LC_BG_CELL_M,
               "bg_buf": C.LC_BG_BUFFER_M, "bg_simp": C.LC_BG_SIMPLIFY_M,
@@ -146,6 +148,8 @@ def lcpng_cached(year: int, mergids) -> dict:
     A dict of base64 blobs, so it uses the same small JSON cache as `firesim_cached`
     rather than parquet.
     """
+    if C.LC_SOURCE == "c3s":
+        return {}
     mergids = sorted(int(m) for m in mergids)
     params = {"buf": C.LC_BUFFER_M, "cell_m": C.LC_PNG_CELL_M, "cap": C.LC_PNG_CAP_PX,
               "split": C.LC_YEAR_SPLIT, "mergids": mergids, "v": 2}
@@ -209,7 +213,7 @@ def goes_cloud_cached(year: int, events: pd.DataFrame) -> dict:
               "excl": list(C.GOES_EXCLUDE_REGIONS),
               "radii": list(C.NEARBY_RADII_KM), "methods": list(C.NEARBY_METHODS),
               "starsig": _star_signature(ev, star_cols), "v": 6}
-    return _json_cached("goescloud", year, params, [C.XLSX_FP],
+    return _json_cached("goescloud", year, params, [C.inventory_stamp(year)],
                         lambda: _build_goes(year, ev))
 
 
@@ -267,6 +271,8 @@ def landcover_fractions_cached(year: int, active_gdf, events: pd.DataFrame) -> p
 
     Blow-up events have an empty (6, 0) polygon; for those, fall back to the first
     `LC_BLOWUP_SPAN_H` hours of detected burning (`active.first_burn_polys`)."""
+    if C.LC_SOURCE == "c3s":
+        return pd.DataFrame(columns=["pcb_id"])
     pre, post = C.LC_ACTIVE_WINDOW
     sub = active_gdf[(active_gdf["pre_h"] == pre) & (active_gdf["post_h"] == post)]
     sub = sub[~sub.geometry.is_empty & sub.geometry.notna()][["pcb_id", "geometry"]]

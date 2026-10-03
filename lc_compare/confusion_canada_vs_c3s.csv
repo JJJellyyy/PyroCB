@@ -1,0 +1,10 @@
+,C3S Needleleaf,C3S Broadleaf deciduous,C3S Mixed,C3S Shrub,C3S Grass/herb,C3S Lichen/sparse,C3S Wetland,C3S Cropland,C3S Non-fuel
+CAN Needleleaf,7748,20,261,201,12,91,41,1,153
+CAN Broadleaf deciduous,55,70,64,6,1,1,0,21,3
+CAN Mixed,249,101,175,14,1,2,4,1,2
+CAN Shrub,737,27,299,168,10,53,7,9,9
+CAN Grass/herb,4818,13,281,341,89,301,85,5,193
+CAN Lichen/sparse,42,8,16,41,5,43,1,0,8
+CAN Wetland,914,45,231,133,22,64,134,23,12
+CAN Cropland,0,13,6,8,2,1,0,250,0
+CAN Non-fuel,385,1,13,6,15,46,3,12,754

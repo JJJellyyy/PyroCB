@@ -752,6 +752,33 @@ def v4_burn(year, onset_utc, lon, pt_metric, radius_km):
                v4_win_steps=win["win_steps"])
     return out
 
+# ---- v5: v4's pooling, but with its own independent radius search ----------------
+V5_RADII_KM = [15.0, 17.5, 20.0, 22.5, 25.0]   # v5: search radii, in the order tried
+
+def v5_burn(year, onset_utc, lon, pt_metric):
+    '''v5: identical construction to v4 (pool the V4_N_STEPS time-closest overpasses,
+    per-pixel time decay, per-step normalisation, stage 3's analysis polygon) but with
+    its own radius search instead of v4's inherited one. v4's radius_km is not a free
+    parameter chosen for v4's own sake - it is whatever the MATCH LADDER settled on to
+    answer "did this event match at all" (10-20 km, picked to confirm a match, not to
+    characterise v4's position). v5 asks the position question on its own terms:
+    start at 15 km and, if the 4-overpass pool finds no detections there at all, widen
+    by 2.5 km - 17.5, 20, 22.5, 25 - stopping at the first radius that finds any pixel.
+    25 km is a hard ceiling: if even that finds nothing, v5 returns v4_burn's own empty
+    result at 25 km rather than guessing or leaving the field undefined.
+
+    Reuses v4_burn as-is at each candidate radius, so v5's only actual difference from
+    v4 is which radius gets passed in - and that radius ships as v5_search_radius_km,
+    the same way search_radius_km documents the ladder's own choice for v3/v4.'''
+    out = None
+    for radius in V5_RADII_KM:
+        out = v4_burn(year, onset_utc, lon, pt_metric, radius)
+        if not np.isnan(out["v4_x"]) or radius == V5_RADII_KM[-1]:
+            break
+    renamed = {("v5_" + k[3:] if k.startswith("v4_") else k): v for k, v in out.items()}
+    renamed["v5_search_radius_km"] = radius
+    return renamed
+
 # ---- Snapshot attribute aggregation (the schema table right after this cell) -----
 def aggregate_matched_fire(year, step, mergid):
     '''One dict of every snap_* column (see the schema table below) for this fire
@@ -1033,9 +1060,12 @@ for i in matched_idx:
     # v4: the same question asked over the 4 time-closest overpasses, time-weighted.
     v4 = v4_burn(year, pcb.loc[i, "datetime"], pcb.loc[i, "lon"], pts_metric.values[i],
                  float(row["search_radius_km"]))
+    # v5: the same time-weighted question, but with its own 15-25 km radius search
+    # instead of inheriting the ladder's - see v5_burn.
+    v5 = v5_burn(year, pcb.loc[i, "datetime"], pcb.loc[i, "lon"], pts_metric.values[i])
     agg_rows.append({"__idx": i,
                      **aggregate_matched_fire(year, row["match_step"], loc["mergid"]),
-                     **loc, **act, **v4})
+                     **loc, **act, **v4, **v5})
 agg_tbl = pd.DataFrame(agg_rows).set_index("__idx")
 
 final = pcb.join(match_tbl.drop(columns="pcb_id").set_index(pcb.index)).join(agg_tbl)
@@ -1045,7 +1075,7 @@ final = gpd.GeoDataFrame(final, geometry="geometry", crs=METRIC_CRS)
 # (the map marker, the GOES star) reads these columns instead of deriving a
 # position of its own - that duplication is what let the map plot a point the
 # notebook never endorsed. NaN stays NaN: an unmatched event has no position.
-for _v in ("v3", "v4"):
+for _v in ("v3", "v4", "v5"):
     _ok = final[f"{_v}_x"].notna()
     final[f"{_v}_lat"] = np.nan
     final[f"{_v}_lon"] = np.nan
@@ -1171,6 +1201,34 @@ if len(v4):
     _v4nsteps = _v4g["v4_win_steps"].dropna().str.count(",") + 1
     assert (_v4nsteps <= 2).all(), "v4 analysis polygon pooled more than 2 images"
 
+# 12) v5 must obey the same invariants as v4, but against ITS OWN radius
+#     (v5_search_radius_km) - v5 does not inherit the ladder's, so it is not bounded
+#     by search_radius_km at all.
+v5 = m[m["v5_x"].notna()]
+if len(v5):
+    _v5p = shapely.points(v5["v5_x"].to_numpy(float), v5["v5_y"].to_numpy(float))
+    _v5off = shapely.distance(_v5p, pts_metric.values[v5.index.to_numpy()]) / 1000.0
+    assert (_v5off <= v5["v5_search_radius_km"].to_numpy() + 1e-6).all(), "v5 position escaped its own search radius"
+    assert v5["v5_search_radius_km"].isin(V5_RADII_KM).all(), "v5 radius outside its own ladder"
+    assert (v5["v5_n_steps_used"] <= V4_N_STEPS).all(), "v5 pooled more steps than allowed"
+    _v5g = v5[v5["v5_n_pixels"] > 0]
+    assert shapely.covered_by(
+        _v5g["v5_geometry"].values,
+        shapely.buffer(shapely.points(_v5g["v5_x"].to_numpy(float),
+                                      _v5g["v5_y"].to_numpy(float)),
+                       ANALYSIS_RADIUS_KM * 1000.0 + _slack)).all(), "v5 window escaped its radius"
+    _v5nsteps = _v5g["v5_win_steps"].dropna().str.count(",") + 1
+    assert (_v5nsteps <= 2).all(), "v5 analysis polygon pooled more than 2 images"
+    print(f"v5: {len(v5)}/{len(m)} events, median search radius {v5['v5_search_radius_km'].median():.1f} km "
+          f"(vs v4's inherited {v4['search_radius_km'].median():.1f} km median), "
+          f"median {v5['v5_area_km2'].median():.1f} km2 / {int(v5['v5_n_pixels'].median())} px")
+    _both = m[m["v4_x"].notna() & m["v5_x"].notna()]
+    if len(_both):
+        _v4v5 = shapely.distance(
+            shapely.points(_both["v4_x"].to_numpy(float), _both["v4_y"].to_numpy(float)),
+            shapely.points(_both["v5_x"].to_numpy(float), _both["v5_y"].to_numpy(float))) / 1000.0
+        print(f"v4 vs v5 position: median {np.median(_v4v5):.2f} km apart, max {_v4v5.max():.2f} km")
+
 print("all checks passed")
 final["match_status"].value_counts()
 """)
@@ -1224,7 +1282,7 @@ if os.path.exists("pcb_matching_clean.gpkg"):
 # matched snapshot clipped to the search buffer). Layer 2: the same rows carrying
 # the WHOLE matched fire footprint instead, so nothing is discarded and the two can
 # be compared directly. One GeoPackage holds both.
-_geoms = ["geometry", "v4_geometry", "snap_clip_geometry", "fire_geometry"]
+_geoms = ["geometry", "v4_geometry", "v5_geometry", "snap_clip_geometry", "fire_geometry"]
 # Layer 1 (default) - THE analysis polygon: active VIIRS pixel footprints within
 # ANALYSIS_RADIUS_KM of the corrected, pixel-weighted centre (stages 2-3).
 final.drop(columns=[c for c in _geoms if c != "geometry"]).to_file(
@@ -1241,6 +1299,12 @@ final.drop(columns=[c for c in _geoms if c != "geometry"]).to_file(
     .drop(columns=[c for c in _geoms if c != "v4_geometry"])
     .set_geometry("v4_geometry")
     .to_file("pcb_matching_clean.gpkg", layer="pcb_active_burn_v4", driver="GPKG"))
+# Layer 3b - v5's analysis window: same construction as v4, re-centred on v5's own
+# independently-searched position (15-25 km, widened only until something is found).
+(final[final["v5_geometry"].notna()]
+    .drop(columns=[c for c in _geoms if c != "v5_geometry"])
+    .set_geometry("v5_geometry")
+    .to_file("pcb_matching_clean.gpkg", layer="pcb_active_burn_v5", driver="GPKG"))
 # Layer 4 - the whole matched fire, unclipped.
 (final[final["fire_geometry"].notna()]
     .drop(columns=[c for c in _geoms if c != "fire_geometry"])
@@ -1248,7 +1312,8 @@ final.drop(columns=[c for c in _geoms if c != "geometry"]).to_file(
     .to_file("pcb_matching_clean.gpkg", layer="matched_fire_full", driver="GPKG"))
 final.drop(columns=_geoms).to_csv("pcb_matching_clean.tsv", sep="\t", index=False)
 print("wrote pcb_matching_clean.gpkg (layers pcb_active_burn, snapshot_clip,"
-      " pcb_active_burn_v4, matched_fire_full) and pcb_matching_clean.tsv:", final.shape)
+      " pcb_active_burn_v4, pcb_active_burn_v5, matched_fire_full) and"
+      " pcb_matching_clean.tsv:", final.shape)
 """)
 
 nb["cells"] = cells

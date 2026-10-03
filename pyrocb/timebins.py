@@ -139,6 +139,20 @@ def snapshot_offsets_h(onset_utc: pd.Timestamp, lon: float) -> tuple[float, floa
     return to_h(b1), to_h(b2), to_h(a1), to_h(a2)
 
 
+def snapshot_pre_offsets_h(onset_utc: pd.Timestamp, lon: float, n: int = 4) -> list[float]:
+    """Nominal hours from onset to the 1st..nth overpass step at-or-before it (b1 first).
+
+    Same schedule and anchor convention as `snapshot_offsets_h` (whose b1/b2 this extends to
+    b3/b4 for the map's static "before" windows); each further step is one half-day earlier.
+    """
+    step = step_containing(onset_utc, lon)
+    out = []
+    for _ in range(n):
+        out.append((nominal_utc(step, lon) - onset_utc).total_seconds() / 3600.0)
+        step = prev_step(step)
+    return out
+
+
 def step_before(onset_utc: pd.Timestamp, obs: pd.DataFrame | None, lon: float,
                 available: set[str] | None = None) -> tuple[str | None, str, float]:
     """Return (step, tier, obs_lag_h) for the last observation before `onset_utc`.

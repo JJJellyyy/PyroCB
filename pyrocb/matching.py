@@ -65,6 +65,7 @@ def match_year(year: int, verbose: bool = True) -> pd.DataFrame:
     out = pd.DataFrame(rows).sort_values("datetime").reset_index(drop=True)
     out = _rescue_new_fire(year, out)
     out = _rescue_dormant(year, out)
+    out = _apply_pixel_matching(out)
     if verbose:
         _report(year, out)
     return out
@@ -119,6 +120,30 @@ def _rescue_new_fire(year: int, out: pd.DataFrame) -> pd.DataFrame:
                 out.loc[i, ["mergid", "match_dist_km", "match_method",
                             "nearest_dist_km", "match_fwd_steps"]] = [
                     int(snap["mergid"].values[j]), round(d_km, 3), method, round(d_km, 3), k + 1]
+    return out
+
+
+def _apply_pixel_matching(out: pd.DataFrame) -> pd.DataFrame:
+    """Overlay the dataset's pixel-based matching (pcbcube.matching, with the mass-based credit fix).
+
+    Where it credits a fire, that fire's `mergid` wins - it was chosen from the detections actually
+    seen within 12 h of onset, whereas the snapshot rules above can pick a neighbour (4 of 396 events
+    differ) or lose the event (1 rescued). The snapshot rules stay the fallback for events the pixel
+    matcher leaves unmatched. `match_method` becomes "pixels" for overridden rows.
+    """
+    fp = C.DATA.parent / "OUTPUT_DATA" / "datacube" / "pcb_events.parquet"
+    if not fp.exists() or out.empty:
+        return out
+    ev = pd.read_parquet(fp, columns=["pcb_id", "matched", "mergid"])
+    ev = ev[ev["matched"].astype(bool)].set_index("pcb_id")["mergid"]
+    out = out.copy()
+    out["mergid"] = pd.array(out["mergid"], dtype="Int64")
+    for i, r in out.iterrows():
+        new = ev.get(r["pcb_id"])
+        if new is None or pd.isna(new):
+            continue
+        if pd.isna(r["mergid"]) or int(r["mergid"]) != int(new):
+            out.loc[i, ["mergid", "match_method"]] = [int(new), "pixels"]
     return out
 
 

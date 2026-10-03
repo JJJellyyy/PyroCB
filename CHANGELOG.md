@@ -7,6 +7,37 @@ Rationale for each choice lives in [DECISIONS.md](DECISIONS.md); data discoverie
 
 ---
 
+## v0.19 — 2026-10-02 — Copernicus land cover, pixel variables, redesigned interface
+
+### Added
+* **Every pixel variable** from `pixels.parquet` (all 155 features in
+  `pixel_variable_dictionary.csv`), per 375 m cell in the animation and as fire-level means on
+  the polygons ("Colour fires by → Variable"). One 4-bit file per variable and year, fetched only
+  when picked (D-93). Built by `build_pixel_attrs.py` into `pixattr/`.
+* **Spread direction as arrows** (D-94): `spread_ux`/`spread_uy` merged into one true bearing, drawn
+  as a wind-map style arrow field coloured by spread rate.
+* **Variable dictionary in the map**: (i) next to each variable picker shows its definition,
+  calculation, source and caveats; "Variable reference" lists and searches all of them.
+* **Static window: 3rd and 4th overpass before onset** (D-89).
+* **Hide / show the menu** (button, or the M key).
+* "Include fires without a pyroCb" colours the grey All-fire-activity fires too.
+
+### Changed
+* **Land cover is Copernicus C3S** everywhere on the map, for every fire worldwide (D-87, F15).
+* **Colour ramps** (D-92): years RdYlBu (blue → red), burn age / day of year / snapshot growth magma,
+  FRP and spread YlOrRd, elevation hypsometric, slope YlOrBr, signed terrain BrBG, vegetation
+  fractions Greens; every key reads low → high, left → right.
+* Animation is whole-fire only; colour modes and pixel variables are one "Colour by" list (D-90).
+* Interface restyled: design tokens, uppercase section labels, segmented controls, a
+  single legend builder; menu and legend share the right column without overlapping.
+* Map source split into `map_src/head.html` + `map_src/tail.html` (tracked, diffable) and the
+  generated `map_src/data.json`; `python map_tool.py join` builds `fire_pcb_map.html`.
+
+### Removed
+* GOES cloud imagery panel (hidden, code kept — D-91). The ±24 h animation scope.
+
+---
+
 ## v0.17 — 2026-09-07 — panel dropdowns, jump-to-time, animation-style fix
 
 ### Added

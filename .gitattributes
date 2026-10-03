@@ -5,5 +5,7 @@
 *.xlsx  filter=lfs diff=lfs merge=lfs -text
 *.pdf   filter=lfs diff=lfs merge=lfs -text
 *.jpg   filter=lfs diff=lfs merge=lfs -text
+# the map's hand-written source (map_tool.py) is small text: keep it in git proper, diffable
+map_src/*.html !filter !diff !merge text
 
 *.ipynb text

@@ -352,3 +352,29 @@ appropriate for bands, and it had been silently displacing their boundaries by u
 **General rule for this project:** morphological open/close is only ever valid on the
 pixel-lattice layers. Everywhere else, reduce vertices with `simplify`, whose error is
 bounded and reportable.
+
+
+---
+
+## F15. Land Cover of Canada maps the burn scar, not the fuel — Copernicus C3S does not
+
+`lc_compare/compare_landcover.py`: 20,000 VIIRS fire pixels in Canada (pixels.parquet),
+Canada 30 m majority class over a ~330 m window vs the Copernicus C3S 300 m class of the fire
+year, both mapped onto 9 shared fuel classes (`lc_compare/results.json`,
+`lc_compare/confusion_canada_vs_c3s.csv`).
+
+| | agreement |
+|---|---|
+| overall | **47%** |
+| fire **after** the Canada map's epoch (2017 vs 2015 map; 2021–23 vs 2020 map) | **65%** |
+| fire **in or before** the epoch (2013–16 vs 2015; 2018–20 vs 2020) | **35%** |
+| C3S fire year vs C3S year before the fire | **99.5%** |
+
+Agreement collapses exactly when the Canada map was made *after* the fire: it then shows the
+burn scar. Canada calls **31%** of fire pixels grassland (C3S:
+0.8%) and 43% needleleaf (C3S:
+75%); where Canada does say needleleaf, C3S agrees
+91% of the time. C3S is annual and barely
+moves across the burn (99.5 % same-year vs year-before), so it describes the fuel that burned.
+It is also global (Alaska, Russia), where the Canada product has nothing. Caveats: 300 m vs
+30 m, and C3S stops at 2022 (2023 fires use the 2022 map). Decision: D-87.

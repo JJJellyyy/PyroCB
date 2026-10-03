@@ -1,0 +1,13 @@
+154 variables from pixel_variable_dictionary.csv
+  2013:   66604 pyroCb-grid cells   2.3 MB |  418457 background cells  13.0 MB | 25996 fires  [25s]
+  2014:  138725 pyroCb-grid cells   3.8 MB |  453889 background cells  13.9 MB | 32897 fires  [32s]
+  2015:  145452 pyroCb-grid cells   4.8 MB |  385846 background cells  13.0 MB | 27563 fires  [29s]
+  2016:   76471 pyroCb-grid cells   2.3 MB |  441333 background cells  13.7 MB | 22950 fires  [25s]
+  2017:   62544 pyroCb-grid cells   1.4 MB |  316766 background cells   9.6 MB | 22545 fires  [22s]
+  2018:   91008 pyroCb-grid cells   2.2 MB |  303561 background cells   8.5 MB | 20345 fires  [21s]
+  2019:  118237 pyroCb-grid cells   3.7 MB |  507184 background cells  14.8 MB | 21493 fires  [35s]
+  2020:   56268 pyroCb-grid cells   1.7 MB |  427632 background cells  13.2 MB | 20569 fires  [29s]
+  2021:  203574 pyroCb-grid cells   5.2 MB |  586777 background cells  15.7 MB | 11040 fires  [59s]
+  2022:   34226 pyroCb-grid cells   1.0 MB |  263975 background cells   8.8 MB | 15986 fires  [21s]
+  2023:  641358 pyroCb-grid cells  20.5 MB |  516261 background cells  17.2 MB | 15645 fires  [69s]
+wrote pixattr/: 208 MB, 5105 files
