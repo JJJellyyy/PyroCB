@@ -83,9 +83,30 @@ BASE_LABELS = {
     "simpson_1p5km": "Simpson diversity (1.5 km)", "simpson_5km": "Simpson diversity (5 km)",
     "n_groups_1p5km": "Fuel groups present (1.5 km)", "n_groups_5km": "Fuel groups present (5 km)",
 }
-GROUP_ORDER = ["Fire behaviour", "Spread", "Burned ground", "Terrain", "Terrain ahead", "Land cover",
-               "Fuel share around", "Fuel ahead / behind", "Fuel change ahead", "Fuel diversity",
-               "Change along fire path"]
+BASE_LABELS.update({
+    "dist_road_km": "Distance to nearest road or track", "dist_road_public_km": "Distance to nearest public road",
+    "aspect_deg": "Aspect (downslope direction)", "tpi_375m": "TPI (375 m, inside the pixel)", "tpi_2km": "TPI (~2 km)",
+    "rough_375m": "Roughness (375 m, inside the pixel)", "rough_2km": "Roughness (~2 km)",
+    "shannon_2km": "Shannon diversity (~2 km)", "n_groups_2km": "Fuel groups present (~2 km)",
+})
+WEATHER_LABELS = {
+    "t2m_C": "Air temperature (2 m)", "d2m_C": "Dew point (2 m)", "rh2m": "Relative humidity (2 m)", "vpd_kPa": "Vapour pressure deficit",
+    "wind10": "Wind speed (10 m)", "wind100": "Wind speed (100 m)", "shear_10_100": "Wind shear 10-100 m", "u10": "Wind, eastward (10 m)",
+    "v10": "Wind, northward (10 m)", "blh": "Boundary layer height", "cape": "CAPE", "cin": "CIN", "kx": "K-index",
+    "totalx": "Total totals index", "tcwv": "Column water vapour", "tp_mm": "Precipitation (1 h)", "swvl1": "Soil moisture (0-7 cm)",
+    "sp_hPa": "Surface pressure", "t850_C": "Temperature 850 hPa", "t700_C": "Temperature 700 hPa", "t500_C": "Temperature 500 hPa",
+    "td850_C": "Dew point 850 hPa", "td700_C": "Dew point 700 hPa", "q850": "Specific humidity 850 hPa",
+    "q700": "Specific humidity 700 hPa", "q500": "Specific humidity 500 hPa", "wind850": "Wind speed 850 hPa",
+    "wind700": "Wind speed 700 hPa", "wind500": "Wind speed 500 hPa", "lapse_850_700": "Temperature drop 850-700 hPa",
+    "lapse_700_500": "Temperature drop 700-500 hPa", "haines_mid": "Haines index (mid)", "c_haines": "Continuous Haines index",
+    "wind_alignment": "Wind along spread direction",
+    "fwi": "Fire Weather Index", "ffmc": "Fine fuel moisture code", "dmc": "Duff moisture code", "dc": "Drought code",
+    "isi": "Initial spread index", "bui": "Build-up index", "dsr": "Daily severity rating",
+}
+GROUP_ORDER = ["Fire behaviour", "Spread", "Terrain", "Access", "Land cover", "Fuel share around", "Fuel change behind",
+               "Fuel diversity", "Weather", "Weather change", "Fire weather indices",
+               # v1 groups, kept for the original table
+               "Burned ground", "Terrain ahead", "Fuel ahead / behind", "Fuel change ahead", "Change along fire path"]
 # land-cover group labels, same order as lc_group (and LC_CLASSES in the map)
 LC_GROUPS = ["Needleleaf evergreen", "Needleleaf deciduous (larch)", "Broadleaf", "Mixed forest", "Shrub",
              "Grass / herb", "Sparse / lichen / moss", "Wetland", "Cropland", "Non-fuel (urban, bare, ice)"]
@@ -103,6 +124,18 @@ def _label(col):
         return _label(col[:-6]) + " · Δ along path"
     if col in BASE_LABELS:
         return BASE_LABELS[col]
+    m = re.match(r"^(.*)_dtime(12|24)h$", col)
+    if m and m.group(1) in WEATHER_LABELS:
+        return f"{WEATHER_LABELS[m.group(1)]} · change over {m.group(2)} h"
+    m = re.match(r"^(fwi|ffmc|dmc|dc|isi|bui|dsr)_d3d$", col)
+    if m:
+        return f"{WEATHER_LABELS[m.group(1)]} · change over 3 days"
+    if col in WEATHER_LABELS:
+        return WEATHER_LABELS[col]
+    m = re.match(r"^frac_(.+?)_(3x3|5x5)(_dbehind)?$", col)
+    if m and m.group(1) in CLASS_NAMES:
+        cls, win = CLASS_NAMES[m.group(1)], {"3x3": "3x3 pixels, ~1.1 km", "5x5": "5x5 pixels, ~1.9 km"}[m.group(2)]
+        return f"{cls} share change behind ({win})" if m.group(3) else f"{cls} share ({win})"
     m = re.match(r"frac_(.+?)_(ahead_1p5km_change|ahead_3km_change|ahead_1p5km|ahead_3km|behind_1p5km|1p5km|5km)$", col)
     if m:
         cls, where = CLASS_NAMES.get(m.group(1), m.group(1)), m.group(2)
@@ -118,6 +151,16 @@ def _group(r):
     col, fam, blk = r["variable"], r["family"], r["block"]
     if fam == "path delta":
         return "Change along fire path"
+    if fam == "access":
+        return "Access"
+    if fam == "fuel change behind":
+        return "Fuel change behind"
+    if fam == "weather":
+        return "Weather"
+    if fam == "weather change (same location)":
+        return "Weather change"
+    if fam == "fire weather index":
+        return "Fire weather indices"
     if fam == "fuel share":
         return "Fuel share around"
     if fam in ("fuel ahead", "fuel behind"):
@@ -137,7 +180,7 @@ def _group(r):
     return "Fire behaviour"
 
 
-SIGNED_TERRAIN = ("tpi_1p5km", "tpi_5km", "slope_along_spread", "elev_gain_ahead_1p5km", "elev_gain_ahead_3km")
+SIGNED_TERRAIN = ("tpi_1p5km", "tpi_5km", "tpi_375m", "tpi_2km", "slope_along_spread", "elev_gain_ahead_1p5km", "elev_gain_ahead_3km")
 
 
 def _kind_ramp(r):
@@ -145,8 +188,13 @@ def _kind_ramp(r):
     col, fam = r["variable"], r["family"]
     if col in ("lc_class", "lc_group"):
         return "cat", "cat"
-    if fam in ("path delta", "fuel change ahead") or col in ("spread_ux", "spread_uy", "aspect_sin", "aspect_cos"):
+    if col.startswith("dist_road"):
+        return "log", "index"
+    if fam in ("path delta", "fuel change ahead", "fuel change behind", "weather change (same location)") \
+            or col in ("spread_ux", "spread_uy", "aspect_sin", "aspect_cos") or col.endswith("_d3d"):
         return "div", "delta"
+    if col == "aspect_deg":
+        return "lin", "index"
     if col in SIGNED_TERRAIN:
         return "div", "signed"
     if col in ("frp", "nb_frp_1p5km", "nb_frp_5km"):

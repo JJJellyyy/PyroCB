@@ -22,8 +22,10 @@ async function unpack(b64){
   return JSON.parse(await new Response(s).text());
 }
 const esc = s => s==null ? "" : String(s).replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+// values are escaped; a value given as {h: "..."} is trusted markup built by this page (no data strings inside unescaped)
 const rows = l => l.filter(r => r[1]!=null && r[1]!=="" && r[1]!==false)
-  .map(r=>`<tr><td style="color:#666;padding-right:8px;vertical-align:top">${esc(r[0])}</td><td>${esc(r[1])}</td></tr>`).join("");
+  .map(r=>`<tr><td style="color:#666;padding-right:8px;vertical-align:top">${esc(r[0])}</td>`
+    + `<td>${r[1] && typeof r[1] === "object" && "h" in r[1] ? r[1].h : esc(r[1])}</td></tr>`).join("");
 const busy = document.getElementById("busy");
 const noticeEl = document.getElementById("notice");
 function showNotice(kind, html){
@@ -821,7 +823,7 @@ function stopGoes(){
 }
 let animReq = null;
 function stopAnim(){ if (animReq){ cancelAnimationFrame(animReq); animReq = null; } }
-function closeInfo(){ stopAnim(); stopGoes(); infoEl.style.display = "none"; clearHighlight(); clearPops(); syncFlow();
+function closeInfo(){ stopAnim(); stopGoes(); infoEl.style.display = "none"; clearHighlight(); clearPops(); syncFlow(); if (apcFocus) apcHighlight(null);
   hideNotice(); if (typeof updateGBar === "function") updateGBar(); }
 
 function openInfoPanel(p){
@@ -838,23 +840,26 @@ function openInfoPanel(p){
   const hasStatic = !FIRE_ONLY && !!byPcbPix[p.pcb_id];
   const dt = FIRE_ONLY ? [
     ["Region",p.region],["Day of year first detected",p.doy],
-    ["Area (km²)",p.farea_km2],["VIIRS pixels",p.n_pixels],
+    ["Area (km²)",p.farea_km2],["VIIRS pixels",p.n_pixels],["Permafrost",{h:pfText(p)}],
+    ["Nearest public / service road",roadText(p)],
   ] : [
     ["Date/time (UTC)",p.datetime],["Region",p.region],["Fire (mergid)",p.mergid],
+    ["Permafrost",{h:pfText(p)}],
+    ["Nearest public / service road",roadText(p)],
     ["pyroCb # on fire",p.pcb_index+" of "+p.n_pcb_total],
     ["Match",p.match_method+(p.match_dist_km!=null?` (${p.match_dist_km} km)`:"")],
     ["Fraction burned before",p.frac_burned_before],["Obs lag (h)",p.obs_lag_h],
-    ["Matched fire v4 (4 overpasses, time-weighted)", p.v4_lat!=null
-      ? `${p.v4_area_km2} km² over ${p.v4_n_steps_used} overpasses `
-        + `(${p.v4_n_pixels} px), median ${p.v4_det_dt_h} h from onset`
-      : "no detections in range"],
-    ["Matched fire v3 (radius ladder)", p.v3_lat!=null
-      ? `mergid ${p.v3_mergid}, ${p.v3_search_radius_km} km search, `
-        + `${p.v3_dt_h>0?"+":""}${p.v3_dt_h} h from onset, ${p.v3_match_dist_km} km away, `
-        + `${p.v3_burn_km2} km² actively burning (${p.v3_n_px} px)`
-        + (p.v3_n_fires > 1 ? ` (${p.v3_n_fires} fires)` : "")
-        + (p.v3_pos_source === "polygon_fallback" ? " [no pixels: polygon fallback]" : "")
-      : "no active fire within 20 km"],
+    ["Injection height", {h: p.max_inject_alt!=null
+      ? `${fmtM(p.max_inject_alt)} ASL &middot; tropopause ${fmtM(p.trop_alt)} &middot; `
+        + `${p.trop_relative_alt>=0?"+":""}${fmtM(p.trop_relative_alt)} vs tropopause`
+        + (p.inj_above_fire!=null ? `<br>${fmtM(p.inj_above_fire)} above the fire (ground ${fmtM(p.fire_elev_m)}) &middot; `
+          + `${Math.round(p.inj_frac_trop*100)}% of the troposphere above the fire` : "")
+      : "not in the inventory"}],
+    ["New coordinate (matched)", {h: p.np_lat!=null
+      ? `${p.np_lat.toFixed(3)}, ${p.np_lon.toFixed(3)} &middot; ${p.np_move_km} km from the report &middot; `
+        + `${p.np_n} px within ${p.np_r} km${p.np_wk ? " &middot; <b>weak match</b>" : ""}`
+        + (p.np_src === "pixels_grown" ? " &middot; position from the credited fire's connected pixels" : "")
+      : "no detections in range &ndash; stays at the reported point"}],
   ];
   // one segmented control: buttons carry data-i, `sub` is the small second line
   const segHTML = (id, items, defIx, cls="") => `<div class="seg ${cls}" id="${id}">`
@@ -874,7 +879,7 @@ function openInfoPanel(p){
   infoEl.innerHTML =
     `<div class="hd"><div class="t">${FIRE_ONLY ? `Fire #${esc(p.mergid)}` : esc(p.pcb_id)}`
       +(p.active_is_blowup?`<span class="badge" title="No VIIRS detection before onset">blow-up</span>`:"")
-      +`</div><div class="s">${sub}</div><span class="x" title="Close">&times;</span></div>`
+      +`</div><div class="s">${sub}</div><span class="mn" title="Minimise">&#9660;</span><span class="x" title="Close">&times;</span></div>`
     +`<div class="bd">`
     +(lcMix ? `<div class="sl"><span class="lbl">Land cover under the active burn</span>${lcMix}`
         +`<div class="cap">Copernicus C3S, 300 m${p.lc_n_px!=null?` &middot; ${p.lc_n_px} cells`:""}</div></div>` : "")
@@ -940,7 +945,12 @@ function openInfoPanel(p){
         +`</div>` : "")
     +`</div>`;
   infoEl.style.display = "block";
+  infoEl.classList.remove("min");
   infoEl.querySelector(".x").onclick = closeInfo;
+  const mn = infoEl.querySelector(".mn");
+  mn.onclick = () => { const on = infoEl.classList.toggle("min"); mn.innerHTML = on ? "&#9650;" : "&#9660;";
+                       mn.title = on ? "Expand" : "Minimise"; };
+  if (!FIRE_ONLY && p.pcb_id && showKind.apc) apcHighlight(p.pcb_id);
 
   const sat = bySat[p.mergid];
   if (sat){
@@ -1676,8 +1686,59 @@ let MODE = "year";
 // for a fire that never made one. pcb/pcbC/orp features (pyroCb events) never carry
 // pcb_linked at all, so this only touches the per/ign fire-level features.
 const ALLFIRE_HUE = "#8a8a8a";
+// ---- road access (MODE === "road"): minimum distance from the fire perimeter to the nearest OSM public or
+// service road (build_road_access.py, property road_km on per/perAll, propagated to pcb/ign/ignAll by mergid).
+// Discrete classes, BrBG (colour-blind safe): teal = accessible -> brown = remote.
+const ROAD_CLS = [
+  {max:0,        lab:"0 km \u2013 a road touches, crosses or lies inside the fire", col:"#01665e"},
+  {max:1,        lab:"< 1 km",   col:"#35978f"},
+  {max:5,        lab:"1\u20135 km",  col:"#80cdc1"},
+  {max:20,       lab:"5\u201320 km", col:"#dfc27d"},
+  {max:50,       lab:"20\u201350 km", col:"#bf812d"},
+  {max:Infinity, lab:"\u2265 50 km", col:"#8c510a"},
+];
+const fireRoad = {};                       // "year:mergid" -> road_km (for growth bands, which do not carry it)
+function roadHue(v){
+  if (v == null || !isFinite(v)) return PIX_NODATA_COL;
+  if (v <= 0) return ROAD_CLS[0].col;
+  for (let i = 1; i < ROAD_CLS.length; i++) if (v < ROAD_CLS[i].max) return ROAD_CLS[i].col;
+  return ROAD_CLS[ROAD_CLS.length-1].col;
+}
+const roadText = p => p.road_km == null ? null : p.road_km <= 0 ? "0 km (a road touches, crosses or lies inside the perimeter)"
+  : p.road_km >= 100 ? "\u2265 100 km" : p.road_km + " km";
 const hueOf = (y,f) => (f.properties.pcb_linked === false && !PAINT_ALL) ? ALLFIRE_HUE
-  : MODE==="year" ? YCOL[y] : MODE==="var" ? varHue(y, f.properties) : doyColor(f.properties.doy);
+  : MODE==="year" ? YCOL[y] : MODE==="var" ? varHue(y, f.properties) : MODE==="road" ? roadHue(f.properties.road_km)
+  : doyColor(f.properties.doy);
+
+// ---- pyroCb markers coloured by injection height (independent of the fire colouring) -------------
+// Fixed scales (about the 2nd-98th percentile of the 2013-2023 inventory) so colours compare across years.
+// Heights: viridis. Signed / ratio quantities: RdBu diverging about their neutral value (tropopause = 0 / 1).
+const PCB_CVARS = {
+  inj:     {key:"max_inject_alt",    label:"Injection height",               unit:"m ASL", lo:8000,  hi:15000, stops:RAMPS.index,
+            def:"Maximum smoke injection altitude from the inventory (brightness-temperature based), metres above sea level."},
+  trop:    {key:"trop_alt",          label:"Tropopause height",              unit:"m ASL", lo:8500,  hi:13700, stops:RAMPS.index,
+            def:"MERRA-2 tropopause altitude at the event (inventory), metres above sea level."},
+  rel:     {key:"trop_relative_alt", label:"Injection - tropopause",         unit:"m",     lo:-3500, hi:3500,  stops:RAMPS.delta, mid:"0 = at the tropopause",
+            def:"Injection height minus tropopause height: below zero = stayed in the troposphere, above zero = reached the stratosphere."},
+  above:   {key:"inj_above_fire",    label:"Injection above fire ground",    unit:"m",     lo:7500,  hi:14000, stops:RAMPS.index,
+            def:"Injection height minus the fire's ground elevation (median Copernicus DEM elevation of the event's active pyroCb pixels; DEM at the plotted point when there are none): how high the plume rose above the fire."},
+  frac:    {key:"inj_frac_trop",     label:"Share of troposphere reached",   unit:"",      lo:0.7,   hi:1.3,   stops:RAMPS.delta, mid:"1 = tropopause",
+            def:"(injection - fire ground) / (tropopause - fire ground): the fraction of the tropospheric column above the fire that the plume crossed. 1 = reached the tropopause, > 1 = overshot into the stratosphere. Both heights relative to the fire's own altitude."},
+};
+let PCB_CMODE = "none";                         // "none" = same colour as the fire | one of PCB_CVARS
+const PCB_NOVAL = "#c8c8c8";
+function _rampAt(stops, f){
+  f = Math.max(0, Math.min(1, f));
+  const x = f*(stops.length-1), i = Math.min(stops.length-2, x|0), g = x-i;
+  const a = hex2rgb(stops[i]), b = hex2rgb(stops[i+1]);
+  return rgb2hex(a.map((v,q)=>v+(b[q]-v)*g));
+}
+function pcbHue(y, ft){
+  if (PCB_CMODE === "none") return hueOf(y, ft);
+  const v = PCB_CVARS[PCB_CMODE], x = ft.properties[v.key];
+  return (x == null || !isFinite(x)) ? PCB_NOVAL : _rampAt(v.stops, (x - v.lo) / (v.hi - v.lo));
+}
+const fmtM = v => v == null ? "–" : Math.round(v).toLocaleString("en").replace(/,/g, " ") + " m";
 
 // 5-point star, black outline, hue fill, ignition number centred on it.
 const STAR = "M10,1 L12.12,7.09 L18.56,7.22 L13.42,11.11 L15.29,17.28 "
@@ -1750,7 +1811,7 @@ PANES.forEach((k,i)=>{ map.createPane(k); map.getPane(k).style.zIndex = 405+i*10
                        R[k] = L.canvas({pane:k}); });
 map.getPane("lc").style.pointerEvents = "none";                      // land cover: backdrop only, never eats a click
 map.createPane("ignlbl"); map.getPane("ignlbl").style.zIndex = 452;   // stars: above bands, below pyroCb
-map.createPane("lbl"); map.getPane("lbl").style.zIndex = 480;
+map.createPane("lbl"); map.getPane("lbl").style.zIndex = 492;
 map.createPane("hl");  map.getPane("hl").style.zIndex = 490;          // fire-activity canvas: on top of all
 map.getPane("hl").style.pointerEvents = "none";                      // ...but transparent to clicks, so a new pyroCb stays selectable
 map.createPane("pop"); map.getPane("pop").style.zIndex = 495;        // "a pyroCb popped" markers, above the burn canvas
@@ -1760,7 +1821,11 @@ map.createPane("nb2"); map.getPane("nb2").style.zIndex = 465;        // matched-
 R.nb2 = L.canvas({pane:"nb2"});
 map.createPane("nb3"); map.getPane("nb3").style.zIndex = 466;        // matched-fire-v3 circle/active-fire overlay, just above nb2
 R.nb3 = L.canvas({pane:"nb3"});
-map.createPane("apc"); map.getPane("apc").style.zIndex = 458;        // active-pyroCb pixels: above bands/ignitions, below pyroCb markers
+map.createPane("pf"); map.getPane("pf").style.zIndex = 410; map.getPane("pf").style.pointerEvents = "none";   // permafrost zones: just above land cover, below the fires
+R.pf = L.canvas({pane:"pf"});
+map.createPane("roads"); map.getPane("roads").style.zIndex = 428; map.getPane("roads").style.pointerEvents = "none";   // roads: above growth bands, below ignitions
+R.roads = L.canvas({pane:"roads"});
+map.createPane("apc"); map.getPane("apc").style.zIndex = 491;        // active-pyroCb pixels: above the burn-animation canvas (hl 490), below the pyroCb markers/badges (lbl 492)
 R.apc = L.canvas({pane:"apc"});
 map.createPane("nb4"); map.getPane("nb4").style.zIndex = 467;        // matched-fire-v4 overlay, just above nb3
 R.nb4 = L.canvas({pane:"nb4"});
@@ -1768,7 +1833,7 @@ burn = new BurnLayer({pane:"hl", padding:0.15}).addTo(map);
 flowLayer = new FlowLayer({pane:"hl", padding:0.15}).addTo(map);
 snapBand = new SnapBandLayer({pane:"bnd", padding:0.15}).addTo(map);
 
-const ALL = ["lc","per","bnd","sb","ign","pcb","pcbC","orp","apc"];
+const ALL = ["lc","per","bnd","sb","ign","ignd","pcb","pcbC","orp","apc"];
 const cache = {}, byFire = {};
 const activeYears = new Set([YEARS[YEARS.length-1]]);
 const showKind = {lc:false, per:true, bnd:true, ign:true, pcb:true, orp:false, apc:false};
@@ -1776,26 +1841,9 @@ const showRegion = {};                 // country toggles, all on to start
 REGIONS.forEach(r => showRegion[r] = true);
 const OUTLINE = {per:false, bnd:false}; // draw as border only, no fill
 let BAND_SRC = "pcb";                  // "pcb" = split at pyroCb | "snap" = 12 h cells (burn age) | "poly12" = 12 h polygon bands
-let PCB_POS  = "fire4";                // D-81: v4 (4-overpass time-weighted match) is now the default. "report" = atlas lat/lon | "fire" = matched-burn centroid (v1, via mergid) | "fire2" = nearby-snapshot centroid (v2, identity-free) | "fire3" = radius-ladder match (v3) | "fire4" = time-weighted match (v4)
+let PCB_POS  = "new";                  // "new" = pcbcube's matched coordinate (np_lat/np_lon, falls back to the report) | "report" = atlas lat/lon
 let SHOW_ERR = false;                  // draw the +/-0.1 deg report uncertainty
-let V2_RADIUS = NEARBY_RADII[0];       // km - which matched-fire-v2 radius is in view (config.NEARBY_RADII_KM)
-let V2_METHOD = NEARBY_METHODS[0];     // which snapshot-selection strategy is in view (config.NEARBY_METHODS)
-// One-line explanation per strategy - full reasoning is pyrocb/nearby.py's docstring.
-const NEARBY_METHOD_DESC = {
-  closest: "Nearest overpass in time, before OR after onset - no causal claim, just whichever look was closest.",
-  before: "Nearest overpass AT OR BEFORE onset. Falls through to an AFTER-onset overpass only once every before-onset option has turned up nothing - i.e. for a blow-up fire, structurally, not a separate flag.",
-  before_after: "Nearest before-onset AND nearest after-onset overpass, POOLED into one search - roughly double the detections of a single-overpass strategy.",
-  before2_after2: "Nearest TWO before-onset AND nearest TWO after-onset overpasses, pooled - the widest net, ~2 days of overpasses either side.",
-};
-let SHOW_NB2_CIRCLE = false;           // draw the v2 search radius around the AS-REPORTED point (where the search ran)
-let SHOW_NB2_FIRE   = false;           // draw the actual active-fire ground the v2 centroid was taken from
-let SHOW_NB2_ARROW  = false;           // draw as-reported -> matched-fire-v2 as an arrow
-let SHOW_NB3_CIRCLE = false;           // draw the v3 search radius actually used (varies per event) around the AS-REPORTED point
-let SHOW_NB3_FIRE   = false;           // draw the matched Snapshot fire polygon itself
-let SHOW_NB3_ARROW  = false;           // draw as-reported -> matched-fire-v3 as an arrow
-let SHOW_NB4_CIRCLE = false;           // v4 uses the same per-event ladder radius as v3
-let SHOW_NB4_FIRE   = false;           // draw v4's time-weighted active-burn window
-let SHOW_NB4_ARROW  = false;           // draw as-reported -> matched-fire-v4 as an arrow
+let SHOW_MOVE = false;                 // arrow: as reported -> new coordinate
 const regionOK = ft => { const r = ft.properties.region;
   return r == null ? true : showRegion[r] !== false; };
 
@@ -1822,20 +1870,75 @@ let hideOrphans=true;                  // unmatched pyroCbs hidden by default (F
 // "All fire activity": every VIIRS-tracked fire's perimeter + ignitions, not just the
 // ones credited with a pyroCb (D-85). Off by default - it's ~10x the feature count.
 let SHOW_ALL_FIRES=false;
+// ---- permafrost (Obu et al. 2019 zones; shares per fire come from build_permafrost.py as pf_c / pf_d / pf_s / pf_i, whole %) ----
+let PF_ON=false, PF_HILITE=false, PF_MIN=1;
+const PF_COL = {c:"#08306b", d:"#2171b5", s:"#6baed6", i:"#c6dbef"};
+const PF_NAME = {c:"Continuous", d:"Discontinuous", s:"Sporadic", i:"Isolated"};
+const PF_HI = "#00e5ff";
+const pfShare = p => (p.pf_c||0) + (p.pf_d||0) + (p.pf_s||0);            // continuous + discontinuous + sporadic
+const pfFields = p => ({pf_c:p.pf_c, pf_d:p.pf_d, pf_s:p.pf_s, pf_i:p.pf_i, road_km:p.road_km});   // road_km rides along
+function pfText(p){
+  const c=p.pf_c||0, d=p.pf_d||0, s=p.pf_s||0, i=p.pf_i||0, t=c+d+s;
+  if (!t && !i) return "none (outside the modelled permafrost zones)";
+  if (!t) return `only isolated patches (${i}% of the burned area)`;
+  const parts = [["continuous",c],["discontinuous",d],["sporadic",s],["isolated",i]].filter(x => x[1] > 0).map(x => `${x[0]} ${x[1]}%`);
+  return `${t}% of the burned area on permafrost (${parts.join(", ")})`;
+}
+let pfLayer = null;
+async function syncPermafrost(){
+  if (!PF_ON){ if (pfLayer && map.hasLayer(pfLayer)) map.removeLayer(pfLayer); return; }
+  if (!pfLayer){
+    try {
+      busy.textContent = "Loading permafrost…"; busy.style.display = "block";
+      const r = await fetch("permafrost.json"); if (!r.ok) throw new Error("HTTP " + r.status);
+      const gj = await r.json();
+      pfLayer = L.geoJSON(gj, {pane:"pf", renderer:R.pf, interactive:false,
+        style: ft => ({stroke:false, fill:true, fillColor:PF_COL[ft.properties.zone], fillOpacity:0.55})});
+    } catch (e){
+      PF_ON = false; const cb = document.getElementById("pfShow"); if (cb) cb.checked = false;
+      showNotice("warn", "<b>Permafrost map unavailable</b> " + esc(e.message) + ". The file permafrost.json must be deployed next to the map (and the page served over http).");
+    } finally { busy.style.display = "none"; }
+  }
+  if (pfLayer && !map.hasLayer(pfLayer)) pfLayer.addTo(map);
+}
+// ---- roads (OpenStreetMap, within 10 km of the pyroCb-linked fires; roads/roads_{year}.json from build_roads_layer.py) ----
+let ROADS_ON=false;
+const roadLayers = {};                                       // year -> L.geoJSON, or null when the year has no file
+const ROAD_STYLE = {2:{color:"#8c2d04", weight:2.2, opacity:0.9}, 1:{color:"#4d4d4d", weight:1.3, opacity:0.85},
+                    0:{color:"#8c6d31", weight:1, opacity:0.9, dashArray:"3 3"}};
+async function syncRoads(){
+  for (const y of YEARS){
+    const want = ROADS_ON && activeYears.has(y);
+    if (want && !(y in roadLayers)){
+      try {
+        const r = await fetch(`roads/roads_${y}.json`); if (!r.ok) throw new Error("HTTP " + r.status);
+        const gj = await r.json();
+        roadLayers[y] = L.geoJSON(gj, {pane:"roads", renderer:R.roads, interactive:false, style: ft => ROAD_STYLE[ft.properties.cls]});
+      } catch (e){ roadLayers[y] = null; console.warn("roads " + y, e); }
+    }
+    const lay = roadLayers[y];
+    if (!lay) continue;
+    if (want && !map.hasLayer(lay)) lay.addTo(map);
+    else if (!want && map.hasLayer(lay)) map.removeLayer(lay);
+  }
+}
+let IGN_DOTS=false;                    // "Ignitions as dots": every ignition (pyroCb-linked too) is a plain dot, no stars / numbers
 
 // One definition of the perimeter / band look, shared by first draw and recolour().
 // "outline only" keeps the boundary and drops the fill, which is what you want when
 // bands or perimeters are stacked over land cover.
 function perStyle(y, ft){
   const hue = hueOf(y, ft);
-  if (OUTLINE.per) return {color:hue, weight:1.6, opacity:1, fill:false};
-  return {color:hue, weight:1, opacity:1, fill:true, fillColor:hue,
-          fillOpacity:(ft.properties.farea_km2||0)>100?0.55:0.3};
+  const hi = PF_HILITE && pfShare(ft.properties) >= PF_MIN, dim = PF_HILITE && !hi;     // highlight mode: cyan outline, others fade
+  if (OUTLINE.per) return hi ? {color:PF_HI, weight:3, opacity:1, fill:false} : {color:hue, weight:1.6, opacity:dim?0.45:1, fill:false};
+  return {color:hi?PF_HI:hue, weight:hi?2.8:1, opacity:dim?0.5:1, fill:true, fillColor:hue,
+          fillOpacity:((ft.properties.farea_km2||0)>100?0.55:0.3) * (dim?0.55:1)};
 }
 function bndStyle(y, ft){
   const p = ft.properties, n = Math.max(1, p.n_bands-1);
   const t = n>0 ? p.band_i/n : 0.5;                  // 0 = core, 1 = outermost
-  const hue = MODE==="year" ? YCOL[y] : MODE==="var" ? varHue(y, p) : doyColor(p.doy);
+  const hue = MODE==="year" ? YCOL[y] : MODE==="var" ? varHue(y, p)
+    : MODE==="road" ? roadHue(p.road_km != null ? p.road_km : fireRoad[`${y}:${p.mergid}`]) : doyColor(p.doy);
   if (OUTLINE.bnd)
     return {color:hue, weight:1.1+1.1*t, opacity:1, fill:false};
   // band order in LIGHTNESS so hue stays free for the colour mode
@@ -1855,7 +1958,8 @@ function buildLayers(y, gj){
     onEachFeature:(ft,l)=>{const p=ft.properties;
       l.bindPopup(`<b>Fire #${esc(p.mergid)}</b> ${y}<table>${rows([
         ["Area (km²)",p.farea_km2],["Duration (d)",p.duration_days],
-        ["VIIRS pixels",p.n_pixels],["Land cover",p.lcc_final],
+        ["VIIRS pixels",p.n_pixels],["Land cover",p.lcc_final],["Permafrost",{h:pfText(p)}],
+        ["Nearest public / service road",roadText(p)],
         ["Day of year",p.doy]])}</table>`);}
   };
   const ignOpts = {
@@ -1875,26 +1979,28 @@ function buildLayers(y, gj){
       // this opens the fire itself, defaulting straight to its whole-fire animation.
       l.on("click", () => DETAIL_MODE==="panel" && openInfoPanel({
         pcb_id: null, mergid: p.mergid, region: p.region, doy: p.doy,
-        n_pixels: p.n_pixels, farea_km2: p.farea_km2,
+        n_pixels: p.n_pixels, farea_km2: p.farea_km2, ...pfFields(p),
       }));
     }
   };
   const pcbOpts = f => ({
     pane:"pcb", renderer:R.pcb, filter:f,
-    pointToLayer:(ft,ll)=>{
-      const p=ft.properties, n=p.pcb_index;
+    pointToLayer:(ft,ll0)=>{
+      const p=ft.properties, n=p.pcb_index, ll=pcbDisplayLatLng(p, ft.geometry.coordinates);
       return n ? L.marker(ll,{pane:"lbl", icon:L.divIcon({className:"", iconSize:[15,15],
-               html:`<div class="pcblbl" style="background:${hueOf(y,ft)};border:1.5px solid #111;
+               html:`<div class="pcblbl" style="background:${pcbHue(y,ft)};border:1.5px solid #111;
                      border-radius:50%;width:15px;height:15px">${n}</div>`})})
                : L.circleMarker(ll,{pane:"pcb",renderer:R.pcb,radius:6,color:"#111",
-                   weight:1.5,fillColor:hueOf(y,ft),fillOpacity:1});},
+                   weight:1.5,fillColor:pcbHue(y,ft),fillOpacity:1});},
     onEachFeature:(ft,l)=>{const p=ft.properties;
       if (DETAIL_MODE==="popup"){
         l.bindPopup(`<b>${esc(p.pcb_id)}</b><br>${esc(p.fire_name||"unnamed")}`
           +(p.active_is_blowup?` <span title="Blew up before it was ever observed">&#9888;&#65039;</span>`:"")
           +`<table>${rows([
           ["Date/time (UTC)",p.datetime],["Region",p.region],["Day of year",p.doy],
-          ["Max injection alt (m)",p.max_inject_alt],["Rel. tropopause (m)",p.trop_relative_alt],
+          ["Max injection alt (m)",p.max_inject_alt],["Tropopause (m)",p.trop_alt],
+          ["Rel. tropopause (m)",p.trop_relative_alt],["Fire ground elevation (m)",p.fire_elev_m],
+          ["Injection above fire (m)",p.inj_above_fire],["Share of troposphere reached",p.inj_frac_trop],
           ["Min BT (°C)",p.pcb_min_bt],["Match",p.match_method],["Dist. to fire (km)",p.match_dist_km],
           ["Fire (mergid)",p.mergid],["pyroCb # on this fire",p.pcb_index+" of "+p.n_pcb_total],
           ["pyroCb before / after",p.n_pcb_before+" / "+p.n_pcb_after],
@@ -1908,7 +2014,9 @@ function buildLayers(y, gj){
           ["Blew up before observed",p.active_is_blowup?"yes":""]])}</table>`);
       }
       l.on("click", () => DETAIL_MODE==="panel" ? openInfoPanel(p)
-                                               : renderActiveWindow(p, 12, 12));}
+                                               : renderActiveWindow(p, 12, 12));
+      l.on("add", () => { const el = l.getElement && l.getElement();
+        if (el && el.firstChild) el.firstChild.style.background = pcbHue(y, ft); });}
   });
   const bndOpts = {
     pane:"bnd", renderer:R.bnd,
@@ -1970,7 +2078,7 @@ function buildLayers(y, gj){
     pcbC: L.geoJSON(gj.pcb, pcbOpts(f=>f.properties.match_method!=="unmatched")),
     orp:  L.geoJSON(gj.pcb, {pane:"orp", renderer:R.orp,
             filter:f=>f.properties.match_method==="unmatched",
-            pointToLayer:(f,ll)=>L.circleMarker(ll,{pane:"orp",renderer:R.orp,radius:11,
+            pointToLayer:(f,ll)=>L.circleMarker(pcbDisplayLatLng(f.properties, f.geometry.coordinates),{pane:"orp",renderer:R.orp,radius:11,
               color:"#e11",weight:2,fill:false}),
             onEachFeature:(f,l)=>{const p=f.properties;
               l.bindPopup(`<b>No ${y} fire within ${ORPHAN_KM} km</b><table>${rows([
@@ -1985,7 +2093,7 @@ function wanted(){
   if (showKind.per) w.add("per");
   if (showKind.bnd && BAND_SRC === "pcb") w.add("bnd");
   if (showKind.bnd && BAND_SRC === "poly12") w.add("sb");
-  if (showKind.ign) w.add("ign");
+  if (showKind.ign) w.add(IGN_DOTS ? "ignd" : "ign");
   if (showKind.pcb) w.add(hideOrphans?"pcbC":"pcb");
   if (showKind.orp && !hideOrphans) w.add("orp");
   if (showKind.apc) w.add("apc");
@@ -1997,38 +2105,67 @@ function wanted(){
 // overpass just before onset (amber) or just after it (red). Built on first display (tens of thousands
 // of footprints a year), drawn on its own canvas. Dashed ring = the 20 km buffer, crosshair = the fixed
 // coordinate. Payload: build_active_pcb.py, straight from pixels_{year}.parquet.
-const APC_COL = ["#f59e0b", "#dc2626"];
+// One colour per pyroCb (Okabe-Ito + 3 extras, assigned in time order within the year so neighbours differ).
+const APC_HUES = ["#E69F00", "#56B4E9", "#009E73", "#D55E00", "#CC79A7", "#0072B2", "#7b3294", "#a6761d", "#1b9e77", "#e7298a"];
+const apcByPid = {};                                   // pcb_id -> {hue, layers:[...], fillA:[...]}
 function apcLayer(y, apc){
   const grp = L.layerGroup();
   let built = false;
   grp.on("add", () => {
     if (built) return; built = true;
-    for (const [pid, e] of Object.entries(apc || {})){
-      const [lo0, la0] = e.c, R = R_APC();
+    const pids = Object.keys(apc || {}).sort();      // pcb_id starts with the date: time order
+    pids.forEach((pid, k) => {
+      const e = apc[pid], hue = APC_HUES[k % APC_HUES.length], R = R_APC();
+      const [lo0, la0] = e.c, own = {hue, layers: [], solid: [], r: e.r};
+      apcByPid[pid] = own;
       const nSide = [0, 0], nFire = {};
       for (const q of e.p){
         const lo = lo0 + q[0]*1e-5, la = la0 + q[1]*1e-5, hx = q[2]*1e-5, hy = q[3]*1e-5;
         nSide[q[4]]++; nFire[q[5]] = (nFire[q[5]]||0) + 1;
-        L.rectangle([[la-hy, lo-hx], [la+hy, lo+hx]], {pane:"apc", renderer:R, interactive:false,
-          stroke: e.fires[q[5]] !== e.mg, color:"#1f2937", weight:0.6,
-          fillColor:APC_COL[q[4]], fillOpacity: e.fires[q[5]] === e.mg ? 0.85 : 0.55}).addTo(grp);
+        const credited = e.fires[q[5]] === e.mg, before = q[4] === 0;
+        const r = L.rectangle([[la-hy, lo-hx], [la+hy, lo+hx]], {pane:"apc", renderer:R, interactive:false,
+          stroke:true, color: credited ? hue : "#111", weight: credited ? 0.5 : 0.9,
+          fillColor:hue, fillOpacity: before ? 0.9 : 0.4});
+        r._apcBase = {fo: before ? 0.9 : 0.4, so: 1};
+        r.addTo(grp); own.layers.push(r);
       }
-      L.circle([la0, lo0], {pane:"apc", renderer:R, radius:e.r*1000, interactive:false,
-        color:"#111", weight:1.4, dashArray:"6 5", fill:false}).addTo(grp);
+      // 10 km ring in the pyroCb's colour, with a #n badge matching the numbered pyroCb marker
+      const ring = L.circle([la0, lo0], {pane:"apc", renderer:R, radius:e.r*1000, interactive:false,
+        color:hue, weight:2.2, dashArray:"7 5", fill:false});
+      ring.addTo(grp); own.ring = ring;
+      const ft = pcbFeatureById(pid), pr = ft ? ft.properties : {};
+      const badge = L.marker([la0 + e.r/111.32, lo0], {pane:"lbl", interactive:true, icon:L.divIcon({className:"",
+        iconSize:[1,1], iconAnchor:[0,10],
+        html:`<div class="apcBadge" style="background:${hue}">#${pr.pcb_index != null ? pr.pcb_index : "?"}`
+          + `<span>${esc(String(pid).slice(9, 11))}-${esc(String(pid).slice(11, 13))} ${esc(String(pid).slice(14, 16))}:${esc(String(pid).slice(16, 18))}Z</span></div>`})});
       const fires = e.fires.map((m, i) => `${esc(m)}${m === e.mg ? " (credited)" : ""}: ${nFire[i]||0}`).join("<br>");
-      L.circleMarker([la0, lo0], {pane:"apc", renderer:R, radius:5, color:"#111", weight:2,
-        fillColor:"#fff", fillOpacity:1}).bindPopup(`<b>Active pyroCb &middot; ${esc(pid)}</b><table>${rows([
-          ["Fixed coordinate", `${la0.toFixed(4)}, ${lo0.toFixed(4)}`],
+      badge.bindPopup(`<b style="color:${hue}">&#9632;</b> <b>Active pyroCb &middot; ${esc(pid)}</b><table>${rows([
+          ["New coordinate", `${la0.toFixed(4)}, ${lo0.toFixed(4)}`],
           ["Position from", e.src === "pixels_grown" ? "credited fire's connected pixels (thin match)" : "time-weighted pixel centroid"],
           ["Weak match", e.wk ? "yes" : "no"],
-          ["Overpass before onset", (e.s[0] || "-") + ` &middot; ${nSide[0]} px`],
-          ["Overpass after onset", (e.s[1] || "-") + ` &middot; ${nSide[1]} px`],
-          ["Pixels per fire", fires]])}</table>
-          <div class="hint">All pixels within ${e.r} km of the fixed coordinate in these two overpasses are the dataset's
-          label&nbsp;=&nbsp;1 pixels, whichever fire they belong to.</div>`).addTo(grp);
-    }
+          ["Overpass(es) at/before onset", {h: esc(e.s[0] || "-") + ` &middot; ${nSide[0]} px`}],
+          ["Overpass(es) after onset", {h: esc(e.s[1] || "-") + ` &middot; ${nSide[1]} px`}],
+          ["Pixels per fire", {h: fires}]])}</table>
+          <div class="hint">All pixels within ${e.r} km of the new coordinate in these overpasses are the dataset's
+          label&nbsp;=&nbsp;1 pixels, whichever fire they belong to.</div>`);
+      badge.on("click", () => apcHighlight(pid));
+      badge.addTo(grp);
+      L.circleMarker([la0, lo0], {pane:"apc", renderer:R, radius:4, color:hue, weight:2.5, fillColor:"#fff",
+        fillOpacity:1, interactive:false}).addTo(grp);
+    });
   });
   return grp;
+}
+// Highlight one pyroCb's pixels (others fade); null clears. Called when a pyroCb is opened or its badge clicked.
+let apcFocus = null;
+function apcHighlight(pid){
+  apcFocus = pid;
+  for (const [k, o] of Object.entries(apcByPid)){
+    const dim = pid != null && k !== pid;
+    o.layers.forEach(r => r.setStyle({fillOpacity: dim ? 0.06 : r._apcBase.fo, opacity: dim ? 0.12 : 1,
+                                      weight: !dim && pid != null ? 1.1 : (r.options.color === "#111" ? 0.9 : 0.5)}));
+    o.ring && o.ring.setStyle({opacity: dim ? 0.2 : 1, weight: !dim && pid != null ? 3.4 : 2.2});
+  }
 }
 const R_APC = () => R.apc;
 
@@ -2049,7 +2186,8 @@ async function ensureYear(y){
   Object.assign(byGoes, goes||{});       // pcb_id  -> pyroCb cloud imagery (GOES)
   Object.assign(byGoesSeries, goesq||{});// pcb_id  -> that event's GOES time series
   (per.features||[]).forEach(f => { if (f.properties.region != null)
-    fireRegion[String(f.properties.mergid)] = f.properties.region; });
+    fireRegion[String(f.properties.mergid)] = f.properties.region;
+    if (f.properties.road_km != null) fireRoad[`${y}:${f.properties.mergid}`] = f.properties.road_km; });
   // perAll/ignAll (every fire without a pyroCb) are deliberately NOT unpacked here -
   // see ensureAllFires(). They are the bulk of the payload and nobody pays for them
   // until the "All fire activity" toggle is actually used.
@@ -2057,6 +2195,15 @@ async function ensureYear(y){
   // a second base64 pass over incompressible data.
   cache[y] = buildLayers(y,{per,ign,pcb,bnd,sb,lc,lcpng:d.lcpng||{},nb2,nb3,nb4});
   cache[y].apc = apcLayer(y, apc);
+  cache[y].ignd = L.geoJSON(ign, {pane:"ign", renderer:R.ign,
+    pointToLayer:(ft,ll)=>L.circleMarker(ll,{pane:"ign", renderer:R.ign, radius:3.2,
+      color:"#5d5d5d", weight:1, fillColor:hueOf(y, ft), fillOpacity:0.95}),
+    onEachFeature:(ft,l)=>{const p=ft.properties;
+      if (DETAIL_MODE==="popup")
+        l.bindPopup(`<b>Ignition ${esc(p.ign_index)} of ${esc(p.n_ign_total)}</b> &middot; fire #${esc(p.mergid)} &middot; ${y}`
+          +`<table>${rows([["Day of year",p.doy],["Fuel",p.ftype],["Area (km²)",p.farea_km2],["VIIRS pixels",p.n_pixels]])}</table>`);
+      l.on("click", () => DETAIL_MODE==="panel" && openInfoPanel({
+        pcb_id: null, mergid: p.mergid, region: p.region, doy: p.doy, n_pixels: p.n_pixels, farea_km2: p.farea_km2, ...pfFields(p)}));}});
   return cache[y];
 }
 
@@ -2084,14 +2231,15 @@ async function ensureAllFires(y){
     onEachFeature:(ft,l)=>{const p=ft.properties;
       l.bindPopup(`<b>Fire #${esc(p.mergid)}</b> ${y}<table>${rows([
         ["Area (km²)",p.farea_km2],["Duration (d)",p.duration_days],
-        ["VIIRS pixels",p.n_pixels],["Day of year",p.doy]])}</table>`);}});
+        ["VIIRS pixels",p.n_pixels],["Day of year",p.doy],["Permafrost",{h:pfText(p)}],
+        ["Nearest public / service road",roadText(p)]])}</table>`);}});
   const ignL = L.geoJSON(ign, {pane:"ign", renderer:R.ign,
     pointToLayer:(ft,ll)=>L.circleMarker(ll,{pane:"ign", renderer:R.ign, radius:3.2,
       color:"#5d5d5d", weight:1, fillColor:hueOf(y, ft), fillOpacity:0.95}),
     onEachFeature:(ft,l)=>{const p=ft.properties;
       l.on("click", () => DETAIL_MODE==="panel" && openInfoPanel({
         pcb_id: null, mergid: p.mergid, region: p.region, doy: p.doy,
-        n_pixels: p.n_pixels, farea_km2: p.farea_km2,
+        n_pixels: p.n_pixels, farea_km2: p.farea_km2, ...pfFields(p),
       }));}});
   allFires[y] = {per: perL, ign: ignL};
   return allFires[y];
@@ -2156,6 +2304,7 @@ async function refresh(){
   } while (pending);
   refreshing=false;
   if (SHOW_ALL_FIRES) syncAllFires();
+  if (ROADS_ON) syncRoads();
   if (typeof updateGBar === "function") updateGBar();
   forceFilter();                       // re-mask newly added layers (region + date)
   rebuildSnapBands();
@@ -2172,9 +2321,10 @@ function recolour(){
       const el=l.getElement&&l.getElement(), pth=el&&el.querySelector("path");
       if (pth) pth.setAttribute("fill", hueOf(y,l.feature));
     });
+    c.ignd && c.ignd.eachLayer(l => { if (l.setStyle) l.setStyle({fillColor: hueOf(y, l.feature)}); });
     ["pcb","pcbC"].forEach(k=>c[k].eachLayer(l=>{
-      if (l.setStyle) l.setStyle({fillColor:hueOf(y,l.feature)});
-      else if (l.getElement && l.getElement()) l.getElement().firstChild.style.background = hueOf(y,l.feature);
+      if (l.setStyle) l.setStyle({fillColor:pcbHue(y,l.feature)});
+      else if (l.getElement && l.getElement()) l.getElement().firstChild.style.background = pcbHue(y,l.feature);
     }));
   }
   for (const y of Object.keys(allFires)){           // the "All fire activity" layers
@@ -2211,11 +2361,22 @@ panel.onAdd = () => {
     <div class="linkrow"><button id="allY">Select all</button><button id="noneY">Clear</button></div>
 
     <span class="lbl">Colour fires by</span>
-    <div class="seg" id="modeSeg"><button id="mYear" class="on">Year</button><button id="mDoy">Day of year</button><button id="mVar">Variable</button></div>
+    <div class="seg" id="modeSeg"><button id="mYear" class="on">Year</button><button id="mDoy">Day of year</button><button id="mVar">Variable</button><button id="mRoad" title="Minimum distance from each fire perimeter to the nearest public or service road (OpenStreetMap)">Road access</button></div>
     <div id="varBox" hidden style="margin-top:6px"><div style="display:flex;gap:6px;align-items:center">
       <select class="fld" id="mVarSel"></select><button class="ibtn" id="mVarInfo" title="What is this and how was it calculated?">i</button></div>
       <div class="defbox" id="mVarDef" hidden></div></div>
     <label class="row" title="Fires without a pyroCb are grey by default (the All fire activity layer)"><input type="checkbox" id="paintAll"> Include fires without a pyroCb</label>
+    <span class="lbl">Colour pyroCbs by</span>
+    <div style="display:flex;gap:6px;align-items:center"><select class="fld" id="pcbColSel">
+      <option value="none">Same as fires</option>
+      <optgroup label="Injection height">
+        <option value="inj">1 &middot; Injection height (m ASL)</option>
+        <option value="trop">2 &middot; Tropopause height (m ASL)</option>
+        <option value="rel">3 &middot; Injection &minus; tropopause (m)</option>
+        <option value="above">4 &middot; Injection above fire ground (m)</option>
+        <option value="frac">5 &middot; Share of troposphere above the fire reached</option>
+      </optgroup></select><button class="ibtn" id="pcbColInfo" title="What is this and how was it calculated?">i</button></div>
+    <div class="defbox" id="pcbColDef" hidden></div>
 
     <details class="sec" open><summary>Layers</summary><div>
       <div class="seg" id="baseSeg"><button data-b="topo" class="on">Topo</button><button data-b="sat">Satellite</button></div>
@@ -2229,9 +2390,13 @@ panel.onAdd = () => {
       <label class="row"><input type="checkbox" data-kind="pcb" checked> pyroCb events</label>
       <div class="fieldrow" style="display:flex;align-items:center;gap:8px;margin:6px 0 4px"><span style="flex:none">Unmatched pyroCb</span>
         <div class="seg sm" id="orpSeg" style="flex:1"><button data-m="flag">Flag</button><button data-m="plain">Plain</button><button data-m="hide" class="on">Hide</button></div></div>
-      <label class="row" title="The dataset's label = 1 pixels: every VIIRS pixel within 20 km of the pyroCb's fixed (matched) coordinate, in the overpass just before onset and the one just after"><input type="checkbox" data-kind="apc"> Active pyroCb pixels <span class="opt">20 km, before + after onset</span></label>
       <label class="row"><input type="checkbox" data-kind="lc"> Land cover <span class="opt">Copernicus C3S, 300 m</span></label>
       <label class="row"><input type="checkbox" id="showAllFires"> All fire activity</label>
+      <label class="row" style="margin-left:24px" title="Draw every ignition as a plain dot: no stars and no pyroCb-order numbers, for pyroCb fires and all other fires alike"><input type="checkbox" id="ignDots"> Ignitions as dots (no stars)</label>
+      <label class="row" title="Permafrost zones from Obu et al. 2019 (TTOP model, 2000-2016): continuous, discontinuous, sporadic, isolated"><input type="checkbox" id="pfShow"> Permafrost zones <span class="opt">Obu et al. 2019</span></label>
+      <label class="row" title="OpenStreetMap roads and tracks within 10 km of each year's pyroCb-linked fires (not drawn for the other fires)"><input type="checkbox" id="roadsShow"> Roads near pyroCb fires <span class="opt">OSM, within 10 km</span></label>
+      <label class="row" style="margin-left:24px" title="Outline fire perimeters in cyan where they overlap continuous, discontinuous or sporadic permafrost; other fires fade"><input type="checkbox" id="pfHi"> Highlight fires on permafrost</label>
+      <div class="seg sm" id="pfMinSeg" style="display:none;margin:2px 0 6px 24px"><button data-v="1" class="on">any overlap</button><button data-v="25">&ge; 25 %</button><button data-v="50">&ge; 50 %</button><button data-v="90">&ge; 90 %</button></div>
       <div class="hint" style="margin:0 0 0 24px">Every VIIRS-tracked fire, not only those that made a pyroCb (grey unless coloured above).
         Click an ignition to open a fire &ndash; animation needs about 20 detections.</div>
     </div></details>
@@ -2241,39 +2406,17 @@ panel.onAdd = () => {
     <details class="sec extOnly" hidden><summary>Regions <span class="tag" id="regTag"></span></summary><div>
       ${REGIONS.map(r=>`<label class="row"><input type="checkbox" data-region="${r}" checked> ${r}</label>`).join("")}
     </div></details>
-    <details class="sec extOnly" hidden><summary>pyroCb position</summary><div>
-      <div class="seg sm"><button id="posFire4" class="on">Matched fire v4</button><button id="posFire3">Matched fire v3</button><button id="posRep">As reported</button></div>
-      <div id="v4Opts">
-      <div class="hint" style="margin:6px 0 4px">Matched fire v4 (D&#8209;76): the 4 time-closest overpasses pooled, every VIIRS
-      pixel weighted exp(&minus;|&Delta;t|/12 h) on its real detection time and normalised per overpass, so timing rather than
-      pixel count decides the pull. Events with no detections in range stay at the atlas point. This is the default.</div>
-      <label class="row"><input type="checkbox" id="showNb4Circle"> v4 search circle (radius used, around the reported point)</label>
-      <label class="row"><input type="checkbox" id="showNb4Fire"> v4 active burn (time-weighted, 4 overpasses)</label>
-      <label class="row"><input type="checkbox" id="showNb4Arrow"> Arrow: as reported &rarr; matched fire v4</label>
-      </div>
+    <details class="sec" open><summary>pyroCb position</summary><div>
+      <div class="seg sm"><button id="posNew" class="on">New coordinate</button><button id="posRep">As reported</button></div>
+      <div class="hint" style="margin:6px 0 4px">New coordinate = the dataset's matched position: VIIRS pixels of all fires within 15 km
+      (widened to 25 km if empty) of the reported point in the 2 overpasses before and 2 after onset, weighted by
+      exp(&minus;|&Delta;t|/12&nbsp;h); thin matches use the credited fire's connected pixels instead. Unmatched events stay at the report.</div>
+      <label class="row"><input type="checkbox" id="showMove"> Arrow: as reported &rarr; new coordinate</label>
       <label class="row"><input type="checkbox" id="showErr"> Report uncertainty box</label>
       <div class="hint">93 % of atlas coordinates are rounded to 0.1&deg; (~11 km N-S); the box is drawn at that grid
       (tighter for the few finer ones).</div>
-      <div id="v2Opts" hidden>
-      <div class="hint" style="margin:6px 0 2px">Radius</div>
-      <div class="seg sm" id="v2RadSeg">${NEARBY_RADII.map((r,i)=>
-        `<button data-r="${r}" class="${i===0?"on":""}">${r} km</button>`).join("")}</div>
-      <div class="hint" style="margin:6px 0 2px">Snapshot strategy</div>
-      <div class="seg sm" id="v2MethodSeg">${NEARBY_METHODS.map((m,i)=>
-        `<button data-m="${m}" class="${i===0?"on":""}">${NEARBY_METHOD_LABEL[m]}</button>`).join("")}</div>
-      <div class="hint" id="v2MethodDesc"></div>
-      <label class="row"><input type="checkbox" id="showNb2Circle"> v2 search circle</label>
-      <label class="row"><input type="checkbox" id="showNb2Fire"> active fire used for centering</label>
-      <label class="row"><input type="checkbox" id="showNb2Arrow"> Arrow: as reported &rarr; matched fire v2</label>
-      </div>
-      <div id="v3Opts" hidden>
-      <div class="hint" style="margin:6px 0 4px">Matched fire v3 (PCB_MATCHING_CLEAN.ipynb, D-70): one position per event from an
-      explicit radius ladder &ndash; closest-in-time Snapshot fire within 10 km; if none, the 2nd-closest only if within
-      &plusmn;12 h of onset; else widen to 12.5 / 15 / 17.5 / 20 km. Nothing within 20 km leaves the event at its reported spot.</div>
-      <label class="row"><input type="checkbox" id="showNb3Circle"> v3 search circle (radius used)</label>
-      <label class="row"><input type="checkbox" id="showNb3Fire"> active burn (VIIRS pixels, 5 km window)</label>
-      <label class="row"><input type="checkbox" id="showNb3Arrow"> Arrow: as reported &rarr; matched fire v3</label>
-      </div>
+      <label class="row" title="The dataset's label = 1 pixels: every VIIRS pixel within 10 km of the new coordinate, in the overpass just before onset and the one just after"><input type="checkbox" data-kind="apc"> Active pyroCb pixels <span class="opt">10 km, before + after onset</span></label>
+      <div class="hint">Each pyroCb has its own colour: ring, badge and pixels match. Select a pyroCb to highlight its own pixels.</div>
     </div></details>
     <details class="sec extOnly" hidden><summary>pyroCb click</summary><div>
       <div class="seg sm"><button id="dPanel" class="on">Info panel</button><button id="dPopup">Popup</button></div>
@@ -2302,7 +2445,8 @@ panel.onAdd = () => {
   d.querySelector("#noneY").onclick = ()=>{activeYears.clear(); refresh();};
   d.querySelectorAll("input[data-kind]").forEach(i=>i.onchange=()=>{
     showKind[i.dataset.kind]=i.checked; refresh(); syncAllFires();
-    if (i.dataset.kind==="lc" || i.dataset.kind==="apc") drawLegend();});
+    if (i.dataset.kind==="lc" || i.dataset.kind==="apc") drawLegend();
+    if (i.dataset.kind==="apc" && !i.checked) apcFocus = null;});
   const regTag = () => { const on = REGIONS.filter(r=>showRegion[r]);
     d.querySelector("#regTag").textContent =
       on.length===REGIONS.length ? "all" : on.length ? on.join(", ") : "none"; };
@@ -2318,6 +2462,13 @@ panel.onAdd = () => {
   orpBtns.forEach(b=>b.onclick=()=>{
     showKind.orp = b.dataset.m === "flag"; hideOrphans = b.dataset.m === "hide";
     orpBtns.forEach(x=>x.classList.toggle("on", x===b)); refresh();});
+  d.querySelector("#ignDots").onchange = e=>{IGN_DOTS=e.target.checked; drawLegend(); refresh().then(forceFilter);};
+  d.querySelector("#roadsShow").onchange = e => { ROADS_ON = e.target.checked; syncRoads().then(drawLegend); };
+  const pfShow = d.querySelector("#pfShow"), pfHi = d.querySelector("#pfHi"), pfMinSeg = d.querySelector("#pfMinSeg");
+  pfShow.onchange = e => { PF_ON = e.target.checked; syncPermafrost().then(drawLegend); };
+  pfHi.onchange = e => { PF_HILITE = e.target.checked; pfMinSeg.style.display = PF_HILITE ? "flex" : "none"; forceFilter(); drawLegend(); };
+  pfMinSeg.querySelectorAll("button").forEach(b => b.onclick = () => {
+    PF_MIN = +b.dataset.v; pfMinSeg.querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b)); forceFilter(); drawLegend(); });
   d.querySelector("#showAllFires").onchange = e=>{SHOW_ALL_FIRES=e.target.checked;
     syncAllFires().then(forceFilter);};
   d.querySelector("#fitSel").onchange = e=>{FIT_ON_SELECT=e.target.checked;};
@@ -2332,17 +2483,23 @@ panel.onAdd = () => {
     d.querySelectorAll("#baseSeg button").forEach(x=>x.classList.toggle("on",x===b));});
 
   // ---- colour fires by: year | day of year | a pixels.parquet variable ---------------------
-  const my=d.querySelector("#mYear"), mdy=d.querySelector("#mDoy"), mvr=d.querySelector("#mVar");
+  const my=d.querySelector("#mYear"), mdy=d.querySelector("#mDoy"), mvr=d.querySelector("#mVar"), mrd=d.querySelector("#mRoad");
   const varBox=d.querySelector("#varBox"), varSel=d.querySelector("#mVarSel"), paintAll=d.querySelector("#paintAll");
+  const pcbColSel = d.querySelector("#pcbColSel"), pcbColDef = d.querySelector("#pcbColDef");
+  const syncPcbDef = () => { const v = PCB_CVARS[PCB_CMODE];
+    pcbColDef.innerHTML = v ? `<b>${v.label}</b> &ndash; ${v.def}` : "pyroCb markers take the colour of their fire (year / day of year / variable above)."; };
+  pcbColSel.onchange = () => { PCB_CMODE = pcbColSel.value; syncPcbDef(); recolour(); };
+  d.querySelector("#pcbColInfo").onclick = () => { pcbColDef.hidden = !pcbColDef.hidden; syncPcbDef(); };
   const setMode = m => { MODE = m;
-    [[my,"year"],[mdy,"doy"],[mvr,"var"]].forEach(([b,k]) => b.classList.toggle("on", k===m));
+    [[my,"year"],[mdy,"doy"],[mvr,"var"],[mrd,"road"]].forEach(([b,k]) => b.classList.toggle("on", k===m));
     varBox.hidden = m !== "var"; forceFilter(); };
   my.onclick  = () => setMode("year");
   mdy.onclick = () => setMode("doy");
   // Variable mode: polygons coloured by the fire-level mean of a pixels.parquet variable.
   // Load every loaded year's aggregates BEFORE switching, so nothing flashes grey.
   const loadAggs = () => Promise.all(Object.keys(cache).map(ensureFireAgg));
-  let varTouched = false;
+  let varTouched = false;               // first use of Variable or Road access colours every fire (PAINT_ALL)
+  mrd.onclick = () => { if (!varTouched){ varTouched = true; PAINT_ALL = true; paintAll.checked = true; } setMode("road"); };
   mvr.onclick = async () => {
     try { await pixMeta(); if (VAR_MODE_IX < 0) VAR_MODE_IX = 0; await loadAggs(); }
     catch (e){ showNotice("warn", "<b>Pixel variables unavailable</b>" + esc(e.message) + ". "
@@ -2366,47 +2523,16 @@ panel.onAdd = () => {
   varSel.onchange = async () => { VAR_MODE_IX = +varSel.value; syncVarDef(); await loadAggs().catch(console.warn); forceFilter(); };
   paintAll.onchange = e => { PAINT_ALL = e.target.checked; forceFilter(); };
 
-  // ---- pyroCb position (advanced) ----------------------------------------------------------
-  const pr=d.querySelector("#posRep"), pf3=d.querySelector("#posFire3"),
-        pf4=d.querySelector("#posFire4");
-  const v2Opts = d.querySelector("#v2Opts"), v3Opts = d.querySelector("#v3Opts"),
-        v4Opts = d.querySelector("#v4Opts");
+  // ---- pyroCb position --------------------------------------------------------------------
+  const pn = d.querySelector("#posNew"), pr = d.querySelector("#posRep");
   const setPos = (mode, on) => {
-    PCB_POS=mode; [pr,pf3,pf4].forEach(b=>b.classList.toggle("on", b===on));
-    v2Opts.hidden = mode !== "fire2";
-    v3Opts.hidden = mode !== "fire3";
-    v4Opts.hidden = mode !== "fire4";
+    PCB_POS = mode; [pn, pr].forEach(b => b.classList.toggle("on", b === on));
     repositionPcb(); drawLegend();
   };
-  pr.onclick  = ()=>setPos("report", pr);
-  pf3.onclick = ()=>setPos("fire3",  pf3);
-  pf4.onclick = ()=>setPos("fire4",  pf4);
-  d.querySelector("#showErr").onchange = e=>{SHOW_ERR=e.target.checked; repositionPcb();};
-  const v2RadBtns = [...d.querySelectorAll("#v2RadSeg button")];
-  v2RadBtns.forEach(b=>b.onclick=()=>{
-    V2_RADIUS = +b.dataset.r;
-    v2RadBtns.forEach(x=>x.classList.toggle("on", x===b));
-    repositionPcb(); drawLegend();
-  });
-  const v2MethodBtns = [...d.querySelectorAll("#v2MethodSeg button")];
-  const v2MethodDesc = d.querySelector("#v2MethodDesc");
-  const setV2MethodDesc = () => { v2MethodDesc.innerHTML = NEARBY_METHOD_DESC[V2_METHOD]; };
-  v2MethodBtns.forEach(b=>b.onclick=()=>{
-    V2_METHOD = b.dataset.m;
-    v2MethodBtns.forEach(x=>x.classList.toggle("on", x===b));
-    setV2MethodDesc();
-    repositionPcb(); drawLegend();
-  });
-  setV2MethodDesc();
-  d.querySelector("#showNb2Circle").onchange = e=>{SHOW_NB2_CIRCLE=e.target.checked; repositionPcb(); drawLegend();};
-  d.querySelector("#showNb2Fire").onchange   = e=>{SHOW_NB2_FIRE=e.target.checked; repositionPcb(); drawLegend();};
-  d.querySelector("#showNb2Arrow").onchange  = e=>{SHOW_NB2_ARROW=e.target.checked; repositionPcb(); drawLegend();};
-  d.querySelector("#showNb3Circle").onchange = e=>{SHOW_NB3_CIRCLE=e.target.checked; repositionPcb(); drawLegend();};
-  d.querySelector("#showNb3Fire").onchange   = e=>{SHOW_NB3_FIRE=e.target.checked; repositionPcb(); drawLegend();};
-  d.querySelector("#showNb3Arrow").onchange  = e=>{SHOW_NB3_ARROW=e.target.checked; repositionPcb(); drawLegend();};
-  d.querySelector("#showNb4Circle").onchange = e=>{SHOW_NB4_CIRCLE=e.target.checked; repositionPcb(); drawLegend();};
-  d.querySelector("#showNb4Fire").onchange   = e=>{SHOW_NB4_FIRE=e.target.checked; repositionPcb(); drawLegend();};
-  d.querySelector("#showNb4Arrow").onchange  = e=>{SHOW_NB4_ARROW=e.target.checked; repositionPcb(); drawLegend();};
+  pn.onclick = () => setPos("new", pn);
+  pr.onclick = () => setPos("report", pr);
+  d.querySelector("#showErr").onchange = e => { SHOW_ERR = e.target.checked; repositionPcb(); };
+  d.querySelector("#showMove").onchange = e => { SHOW_MOVE = e.target.checked; repositionPcb(); drawLegend(); };
   const dp=d.querySelector("#dPanel"), du=d.querySelector("#dPopup");
   dp.onclick = ()=>{DETAIL_MODE="panel"; dp.classList.add("on"); du.classList.remove("on");
     Object.keys(cache).forEach(y=>cache[y].pcb.eachLayer(l=>l.unbindPopup&&l.unbindPopup()));};
@@ -2476,8 +2602,10 @@ function drawLegend(){
   if (!legendBody) return;
   const features = `<span class="lbl">Features</span>
     <div class="row"><i class="sq" style="background:#888"></i>Fire perimeter</div>
-    <div class="row"><svg width="14" height="14" viewBox="0 0 20 20" style="flex:none">
-      <path d="${STAR}" fill="#888" stroke="#111" stroke-width="1.4" stroke-linejoin="round"/></svg>Ignition (numbered in order)</div>
+    ${IGN_DOTS
+      ? `<div class="row"><i style="background:#888;border:1px solid #5d5d5d;border-radius:50%;width:9px;height:9px"></i>Ignition (dot)</div>`
+      : `<div class="row"><svg width="14" height="14" viewBox="0 0 20 20" style="flex:none">
+      <path d="${STAR}" fill="#888" stroke="#111" stroke-width="1.4" stroke-linejoin="round"/></svg>Ignition (numbered in order)</div>`}
     <div class="row"><i style="background:#888;border:1.5px solid #111"></i>pyroCb (numbered on its fire)</div>
     <div class="row"><i style="border:2px solid #e11;background:none"></i>Unmatched pyroCb</div>`;
   // colour key: same low -> high convention everywhere
@@ -2487,6 +2615,11 @@ function drawLegend(){
           `<span class="chip on" style="background:${YCOL[y]};color:${inkOn(YCOL[y])}">${y}</span>`).join("")}</div>`
     : MODE === "var" && PIX_META && VAR_MODE_IX >= 0
       ? `<span class="lbl">Colour: variable</span>` + varLegendHTML()
+    : MODE === "road"
+      ? `<span class="lbl">Colour: road access</span>`
+        + catKey("Nearest public / service road (OpenStreetMap, today's network)", ROAD_CLS.map(c => c.lab), ROAD_CLS.map(c => c.col))
+        + `<div class="hint">Minimum distance from the fire's final perimeter to the nearest public road (motorway &hellip; residential, unclassified) `
+        + `or service road; tracks and paths excluded. Capped at 100 km.</div>`
       : `<span class="lbl">Colour: day of year</span>`
         + rampKey("First detection", SEQ_STOPS, md(DOY0), md(DOY1), md(Math.round((DOY0+DOY1)/2)));
   const lc = showKind.lc
@@ -2498,31 +2631,31 @@ function drawLegend(){
       ? `Growth bands: 12 h snapshots, 375 m cells coloured by the day each cell first burned (same ramp as day of year).`
       : `Growth bands: pale core = burned before the first pyroCb, darker = later runs; the faintest outer band is after the last pyroCb.`}
     Click a pyroCb for its active-burn window and animation.</div>` : "";
-  const pos = (c, txt) => `<div class="hint" style="color:${c};margin-top:6px">${txt}</div>`;
-  const notes = (SHOW_EXTENDED && PCB_POS==="fire2" ? pos("#7d1128", `pyroCb plotted on the matched-fire-v2 position: the unweighted mean of every VIIRS
-        detection within ${V2_RADIUS} km of the report, at the overpass(es) &ldquo;${NEARBY_METHOD_LABEL[V2_METHOD]}&rdquo; selects.
-        Events with nothing detected that close stay at the atlas point.
-        ${SHOW_NB2_CIRCLE?` Dashed circle = the ${V2_RADIUS} km search radius, around the reported point.`:""}
-        ${SHOW_NB2_FIRE?" Teal = the detections actually averaged.":""}
-        ${SHOW_NB2_ARROW?" Arrow = as reported &rarr; matched fire v2.":""}`) : "")
-    + (SHOW_EXTENDED && PCB_POS==="fire3" ? pos("#15803d", `pyroCb plotted on the matched-fire-v3 position: the radius-ladder match
-        from PCB_MATCHING_CLEAN.ipynb (D-70) &ndash; closest-in-time Snapshot fire within 10&ndash;20 km, escalating radius,
-        the 2nd time-candidate capped at &plusmn;12 h. Events with no active fire within 20 km stay at the atlas point.
-        ${SHOW_NB3_CIRCLE?" Dashed circle = the search radius actually used for this event.":""}
-        ${SHOW_NB3_FIRE?" Green = the matched Snapshot fire polygon.":""}
-        ${SHOW_NB3_ARROW?" Arrow = as reported &rarr; matched fire v3.":""}`) : "")
-    + (SHOW_EXTENDED && PCB_POS==="fire4" ? pos("#b45309", `pyroCb plotted on the matched-fire-v4 position (D&#8209;76): the 4 time-closest
-        overpasses pooled, every VIIRS pixel weighted exp(&minus;|&Delta;t|/12 h) on its real detection time and normalised
-        per overpass. Events with no detections in range stay at the atlas point.
-        ${SHOW_NB4_CIRCLE?" Dashed circle = the ladder radius used for this event.":""}
-        ${SHOW_NB4_FIRE?" Amber = the time-weighted active burn.":""}
-        ${SHOW_NB4_ARROW?" Arrow = as reported &rarr; matched fire v4.":""}`) : "");
+  const notes = PCB_POS === "new"
+    ? `<div class="hint" style="color:#b45309;margin-top:6px">pyroCbs plotted on the NEW coordinate (dataset matching).`
+      + `${SHOW_MOVE ? " Line + triangle = as reported &rarr; new." : ""} Unmatched events stay at the reported point.</div>` : "";
   const apcKey = showKind.apc ? `<span class="lbl">Active pyroCb pixels</span>
-    <div class="row"><i class="sq" style="background:${APC_COL[0]}"></i>Overpass before onset</div>
-    <div class="row"><i class="sq" style="background:${APC_COL[1]}"></i>Overpass after onset</div>
-    <div class="row"><i style="border:1.5px dashed #111;background:none"></i>20 km around the fixed coordinate</div>
-    <div class="hint">Outlined squares belong to other fires than the credited one; all of them are label&nbsp;=&nbsp;1 in the dataset.</div>` : "";
-  legendBody.innerHTML = features + colour + lc + apcKey + note + notes;
+    <div class="row"><i class="sq" style="background:#8a8a8a"></i>Solid = overpass before onset</div>
+    <div class="row"><i class="sq" style="background:#d4d4d4;border:1px solid #8a8a8a"></i>Pale = overpass after onset</div>
+    <div class="row"><i style="border:1.5px dashed #555;background:none"></i>10 km around the new coordinate</div>
+    <div class="hint">One colour per pyroCb: its ring, its <b>#n</b> badge (same n as the numbered marker) and its pixels.
+    Dark outline = a pixel of another fire than the credited one. All are label&nbsp;=&nbsp;1 in the dataset.</div>` : "";
+  const pv = PCB_CVARS[PCB_CMODE];
+  const pcbKey = pv ? `<span class="lbl">pyroCb colour</span>` + rampKey(pv.label + (pv.unit ? ` (${pv.unit})` : ""),
+      pv.stops, (pv.unit ? Math.round(pv.lo).toLocaleString("en") : pv.lo) + " or less",
+      (pv.unit ? Math.round(pv.hi).toLocaleString("en") : pv.hi) + " or more", pv.mid || null)
+    + `<div class="keylab" style="justify-content:flex-start;gap:6px;margin-top:4px">`
+    + `<span class="swatch" style="background:${PCB_NOVAL}"></span>no value</div>` : "";
+  const pfKey = (PF_ON || PF_HILITE) ? `<span class="lbl">Permafrost</span>`
+    + (PF_ON ? ["c","d","s","i"].map(k => `<div class="row"><i class="sq" style="background:${PF_COL[k]}"></i>${PF_NAME[k]}</div>`).join("") : "")
+    + (PF_HILITE ? `<div class="row"><i style="border:2.5px solid ${PF_HI};background:none"></i>Fire on permafrost (${PF_MIN <= 1 ? "any overlap" : "&ge; " + PF_MIN + " % of its area"}; continuous, discontinuous or sporadic)</div>` : "")
+    + (PF_ON ? `<div class="hint">Obu et al. 2019: permafrost zones from the modelled permafrost probability (TTOP, 2000-2016, 1 km).</div>` : "") : "";
+  const roadsKey = ROADS_ON ? `<span class="lbl">Roads (OpenStreetMap)</span>
+    <div class="row"><i style="width:22px;height:0;border-radius:0;border:0;border-top:3px solid #8c2d04;background:none"></i>Major roads</div>
+    <div class="row"><i style="width:22px;height:0;border-radius:0;border:0;border-top:2px solid #4d4d4d;background:none"></i>Other public roads</div>
+    <div class="row"><i style="width:22px;height:0;border-radius:0;border:0;border-top:2px dashed #8c6d31;background:none"></i>Tracks (forest / logging)</div>
+    <div class="hint">Only within 10 km of pyroCb-linked fires. Today's network, not 2013-2023.</div>` : "";
+  legendBody.innerHTML = features + colour + pcbKey + lc + pfKey + roadsKey + apcKey + note + notes;
 }
 
 // ---- find-a-fire search -------------------------------------------------
@@ -2623,8 +2756,6 @@ function eventVisible(ft){
 function pcbShown(ft){ return showKind.pcb && eventVisible(ft); }
 // v2 field names are keyed by radius AND method: fire2_r10_before_lat,
 // fire2_r15_before2_after2_lon, ... (see pyrocb/nearby.py `_key`).
-const v2Key = (base) => `fire2_r${V2_RADIUS}_${V2_METHOD}_${base}`;
-
 // Where a pyroCb sits on the map right now, honouring the "pyroCb position" setting.
 // repositionPcb() moves the markers with this; anything else that draws a pyroCb has to
 // resolve through it too, or it ends up pinned to the atlas point while the marker moves.
@@ -2632,14 +2763,8 @@ const v2Key = (base) => `fire2_r${V2_RADIUS}_${V2_METHOD}_${base}`;
 // (v2: no VIIRS detection within V2_RADIUS; v3: no active fire within 20 km at either
 // time-candidate).
 function pcbDisplayLatLng(p, coords){
-  let pos = [coords[1], coords[0]];
-  if (PCB_POS === "fire2" && p[v2Key("lat")] != null && p[v2Key("lon")] != null)
-    pos = [p[v2Key("lat")], p[v2Key("lon")]];
-  if (PCB_POS === "fire3" && p.v3_lat != null && p.v3_lon != null)
-    pos = [p.v3_lat, p.v3_lon];
-  if (PCB_POS === "fire4" && p.v4_lat != null && p.v4_lon != null)
-    pos = [p.v4_lat, p.v4_lon];
-  return pos;
+  if (PCB_POS === "new" && p.np_lat != null && p.np_lon != null) return [p.np_lat, p.np_lon];
+  return [coords[1], coords[0]];
 }
 
 // fsim.pcb_ll is baked into the fire-track payload from the as-reported atlas
@@ -2683,248 +2808,36 @@ function repositionPcb(){
            dashArray:"3 3", fill:false, interactive:false}).addTo(errLayer);
       });
   }
-  rebuildNb2();
-  rebuildNb3();
-  rebuildNb4();
+  rebuildMove();
 }
 
-// ---- matched-fire-v2 extras: search circle, the active-fire ground behind it, and
-// an arrow from the as-reported point to the v2 position -------------------------
+// ---- arrow: as reported -> new coordinate -----------------------------------------------------
 function bearingDeg(lat1, lon1, lat2, lon2){
-  // Standard initial-bearing formula (0 = north, clockwise), degrees. Short arrows
-  // only, so no need to worry about which great-circle branch it takes.
   const rad = d => d * Math.PI / 180;
   const dLon = rad(lon2 - lon1), la1 = rad(lat1), la2 = rad(lat2);
   const y = Math.sin(dLon) * Math.cos(la2);
   const x = Math.cos(la1) * Math.sin(la2) - Math.sin(la1) * Math.cos(la2) * Math.cos(dLon);
   return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
 }
-let nb2Layer = null;
-function rebuildNb2(){
-  if (nb2Layer){ map.removeLayer(nb2Layer); nb2Layer = null; }
-  if (PCB_POS !== "fire2" || (!SHOW_NB2_CIRCLE && !SHOW_NB2_FIRE && !SHOW_NB2_ARROW)) return;
-
-  // Which pyroCb are actually on screen right now, reusing the exact same rule the
-  // markers themselves obey (region/date filters, hide-unmatched, layer toggle) -
-  // so these overlays never outlive a hidden event.
-  const shown = new Set();
+let moveLayer = null;
+function rebuildMove(){
+  if (moveLayer){ map.removeLayer(moveLayer); moveLayer = null; }
+  if (PCB_POS !== "new" || !SHOW_MOVE) return;
+  moveLayer = L.layerGroup().addTo(map);
   for (const y of Object.keys(cache)){
-    if (!activeYears.has(+y)) continue;
-    const c = cache[y];
-    c.pcb && c.pcb.eachLayer(l => { if (pcbShown(l.feature)) shown.add(l.feature.properties.pcb_id); });
-  }
-  if (!shown.size) return;
-
-  nb2Layer = L.layerGroup().addTo(map);
-
-  if (SHOW_NB2_CIRCLE){
-    for (const y of Object.keys(cache)){
-      if (!activeYears.has(+y)) continue;
-      cache[y].pcb.eachLayer(l => {
-        const p = l.feature.properties, g = l.feature.geometry.coordinates;
-        if (!shown.has(p.pcb_id) || p[v2Key("lat")] == null) return;
-        // Centred on the AS-REPORTED point, because that is where the search actually
-        // ran (nearby.py balls the KD-tree around the atlas lat/lon). Drawing it around
-        // the result would imply the detections were gathered around the answer.
-        // `feature.geometry` keeps the reported coordinates even while PCB_POS moves the
-        // marker itself - setLatLng does not write back to the feature.
-        L.circle([g[1], g[0]], {
-          radius: V2_RADIUS * 1000, pane:"nb2", renderer:R.nb2,
-          color:"#7d1128", weight:1.5, dashArray:"4 4", fill:false, interactive:false,
-        }).addTo(nb2Layer);
-      });
-    }
-  }
-
-  if (SHOW_NB2_ARROW){
-    for (const y of Object.keys(cache)){
-      if (!activeYears.has(+y)) continue;
-      cache[y].pcb.eachLayer(l => {
-        const p = l.feature.properties, g = l.feature.geometry.coordinates;
-        if (!shown.has(p.pcb_id) || p[v2Key("lat")] == null) return;
-        const from = [g[1], g[0]], to = [p[v2Key("lat")], p[v2Key("lon")]];
-        if (from[0] === to[0] && from[1] === to[1]) return;   // nothing to draw
-        L.polyline([from, to], {pane:"nb2", renderer:R.nb2, color:"#7d1128",
-          weight:2, opacity:0.85, interactive:false}).addTo(nb2Layer);
-        const brg = bearingDeg(from[0], from[1], to[0], to[1]);
-        L.marker(to, {pane:"nb2", interactive:false, icon:L.divIcon({className:"",
-          iconSize:[14,14], iconAnchor:[7,7],
-          html:`<div style="width:0;height:0;border-left:6px solid transparent;`
-            +`border-right:6px solid transparent;border-bottom:11px solid #7d1128;`
-            +`transform:rotate(${brg}deg);transform-origin:50% 70%"></div>`,
-        })}).addTo(nb2Layer);
-      });
-    }
-  }
-
-  if (SHOW_NB2_FIRE){
-    for (const y of Object.keys(cache)){
-      if (!activeYears.has(+y)) continue;
-      const feats = (cache[y].nb2raw.features || [])
-        .filter(f => f.properties.radius_km === V2_RADIUS && f.properties.method === V2_METHOD
-                    && shown.has(f.properties.pcb_id));
-      if (!feats.length) continue;
-      L.geoJSON({type:"FeatureCollection", features:feats}, {
-        pane:"nb2", renderer:R.nb2,
-        style: () => ({color:"#0d9488", weight:1, fillColor:"#2dd4bf", fillOpacity:0.55}),
-        onEachFeature:(ft,l)=>{const p=ft.properties;
-          l.bindPopup(`<b>Detections used for centering</b> &middot; ${esc(p.pcb_id)}<table>${rows([
-            ["Radius (km)",p.radius_km],["VIIRS detections",p.n_pixels],
-            ["Footprint area (km²)",p.area_km2],
-            ["Fires touched",p.n_fires],["mergid(s)",p.mergids],
-            ["Overpass",p.step],["Nominal offset (h)",p.dt_h],
-            ["Median detection offset (h)",p.det_dt_h]])}</table>`);}
-      }).addTo(nb2Layer);
-    }
-  }
-}
-
-// ---- matched-fire-v3 extras: same 3 overlays as v2, but a single result per event -
-// no radius/method to filter by, and the search circle radius VARIES per event (each
-// one already carries its own resolved `v3_search_radius_km`, unlike v2's global slider).
-let nb3Layer = null;
-function rebuildNb3(){
-  if (nb3Layer){ map.removeLayer(nb3Layer); nb3Layer = null; }
-  if (PCB_POS !== "fire3" || (!SHOW_NB3_CIRCLE && !SHOW_NB3_FIRE && !SHOW_NB3_ARROW)) return;
-
-  const shown = new Set();
-  for (const y of Object.keys(cache)){
-    if (!activeYears.has(+y)) continue;
-    const c = cache[y];
-    c.pcb && c.pcb.eachLayer(l => { if (pcbShown(l.feature)) shown.add(l.feature.properties.pcb_id); });
-  }
-  if (!shown.size) return;
-
-  nb3Layer = L.layerGroup().addTo(map);
-
-  if (SHOW_NB3_CIRCLE){
-    for (const y of Object.keys(cache)){
-      if (!activeYears.has(+y)) continue;
-      cache[y].pcb.eachLayer(l => {
-        const p = l.feature.properties, g = l.feature.geometry.coordinates;
-        if (!shown.has(p.pcb_id) || p.v3_lat == null) return;
-        // Centred on the AS-REPORTED point (same convention as v2's circle): that is
-        // where the ladder search actually ran outward from.
-        L.circle([g[1], g[0]], {
-          radius: p.v3_search_radius_km * 1000, pane:"nb3", renderer:R.nb3,
-          color:"#15803d", weight:1.5, dashArray:"4 4", fill:false, interactive:false,
-        }).addTo(nb3Layer);
-      });
-    }
-  }
-
-  if (SHOW_NB3_ARROW){
-    for (const y of Object.keys(cache)){
-      if (!activeYears.has(+y)) continue;
-      cache[y].pcb.eachLayer(l => {
-        const p = l.feature.properties, g = l.feature.geometry.coordinates;
-        if (!shown.has(p.pcb_id) || p.v3_lat == null) return;
-        const from = [g[1], g[0]], to = [p.v3_lat, p.v3_lon];
-        if (from[0] === to[0] && from[1] === to[1]) return;   // nothing to draw
-        L.polyline([from, to], {pane:"nb3", renderer:R.nb3, color:"#15803d",
-          weight:2, opacity:0.85, interactive:false}).addTo(nb3Layer);
-        const brg = bearingDeg(from[0], from[1], to[0], to[1]);
-        L.marker(to, {pane:"nb3", interactive:false, icon:L.divIcon({className:"",
-          iconSize:[14,14], iconAnchor:[7,7],
-          html:`<div style="width:0;height:0;border-left:6px solid transparent;`
-            +`border-right:6px solid transparent;border-bottom:11px solid #15803d;`
-            +`transform:rotate(${brg}deg);transform-origin:50% 70%"></div>`,
-        })}).addTo(nb3Layer);
-      });
-    }
-  }
-
-  if (SHOW_NB3_FIRE){
-    for (const y of Object.keys(cache)){
-      if (!activeYears.has(+y)) continue;
-      const feats = (cache[y].nb3raw.features || []).filter(f => shown.has(f.properties.pcb_id));
-      if (!feats.length) continue;
-      L.geoJSON({type:"FeatureCollection", features:feats}, {
-        pane:"nb3", renderer:R.nb3,
-        style: () => ({color:"#15803d", weight:1, fillColor:"#4ade80", fillOpacity:0.55}),
-        onEachFeature:(ft,l)=>{const p=ft.properties;
-          l.bindPopup(`<b>Matched fire v3</b> &middot; ${esc(p.pcb_id)}<table>${rows([
-            ["mergid",p.mergid],["Search radius (km)",p.search_radius_km],
-            ["Onset&rarr;snapshot (h)",p.match_dt_h],["Distance (km)",p.match_dist_km],
-            ["Actively burning (km²)",p.active_area_km2],
-            ["VIIRS detections",p.active_n_pixels],
-            ["Median detection offset (h)",p.active_det_dt_h],
-            ["Cumulative burn in buffer (km²)",p.clip_area_km2],
-            ["Fires in buffer",p.n_fires_in_buffer]])}</table>`);}
-      }).addTo(nb3Layer);
-    }
-  }
-}
-
-let nb4Layer = null;
-function rebuildNb4(){
-  if (nb4Layer){ map.removeLayer(nb4Layer); nb4Layer = null; }
-  if (PCB_POS !== "fire4" || (!SHOW_NB4_CIRCLE && !SHOW_NB4_FIRE && !SHOW_NB4_ARROW)) return;
-
-  const shown = new Set();
-  for (const y of Object.keys(cache)){
-    if (!activeYears.has(+y)) continue;
-    const c = cache[y];
-    c.pcb && c.pcb.eachLayer(l => { if (pcbShown(l.feature)) shown.add(l.feature.properties.pcb_id); });
-  }
-  if (!shown.size) return;
-
-  nb4Layer = L.layerGroup().addTo(map);
-
-  if (SHOW_NB4_CIRCLE){
-    for (const y of Object.keys(cache)){
-      if (!activeYears.has(+y)) continue;
-      cache[y].pcb.eachLayer(l => {
-        const p = l.feature.properties, g = l.feature.geometry.coordinates;
-        if (!shown.has(p.pcb_id) || p.v4_lat == null) return;
-        // v4 pools its pixels from the SAME ladder buffer v3 resolved, so the circle
-        // is the same radius - what differs is how the pixels inside it are weighted.
-        L.circle([g[1], g[0]], {
-          radius: p.v3_search_radius_km * 1000, pane:"nb4", renderer:R.nb4,
-          color:"#b45309", weight:1.5, dashArray:"4 4", fill:false, interactive:false,
-        }).addTo(nb4Layer);
-      });
-    }
-  }
-
-  if (SHOW_NB4_ARROW){
-    for (const y of Object.keys(cache)){
-      if (!activeYears.has(+y)) continue;
-      cache[y].pcb.eachLayer(l => {
-        const p = l.feature.properties, g = l.feature.geometry.coordinates;
-        if (!shown.has(p.pcb_id) || p.v4_lat == null) return;
-        const from = [g[1], g[0]], to = [p.v4_lat, p.v4_lon];
-        if (from[0] === to[0] && from[1] === to[1]) return;
-        L.polyline([from, to], {pane:"nb4", renderer:R.nb4, color:"#b45309",
-          weight:2, opacity:0.85, interactive:false}).addTo(nb4Layer);
-        const brg = bearingDeg(from[0], from[1], to[0], to[1]);
-        L.marker(to, {pane:"nb4", interactive:false, icon:L.divIcon({className:"",
-          iconSize:[14,14], iconAnchor:[7,7],
-          html:`<div style="width:0;height:0;border-left:6px solid transparent;`
-            +`border-right:6px solid transparent;border-bottom:11px solid #b45309;`
-            +`transform:rotate(${brg}deg);transform-origin:50% 70%"></div>`,
-        })}).addTo(nb4Layer);
-      });
-    }
-  }
-
-  if (SHOW_NB4_FIRE){
-    for (const y of Object.keys(cache)){
-      if (!activeYears.has(+y)) continue;
-      const feats = (cache[y].nb4raw.features || []).filter(f => shown.has(f.properties.pcb_id));
-      if (!feats.length) continue;
-      L.geoJSON({type:"FeatureCollection", features:feats}, {
-        pane:"nb4", renderer:R.nb4,
-        style: () => ({color:"#b45309", weight:1, fillColor:"#fbbf24", fillOpacity:0.55}),
-        onEachFeature:(ft,l)=>{const p=ft.properties;
-          l.bindPopup(`<b>Matched fire v4</b> &middot; ${esc(p.pcb_id)}<table>${rows([
-            ["mergid",p.mergid],["Search radius (km)",p.search_radius_km],
-            ["Actively burning (km²)",p.v4_area_km2],
-            ["VIIRS detections",p.v4_n_pixels],
-            ["Overpasses pooled",p.v4_n_steps_used],["Overpasses",p.v4_steps],
-            ["Median detection offset (h)",p.v4_det_dt_h]])}</table>`);}
-      }).addTo(nb4Layer);
-    }
+    if (!activeYears.has(+y) || !cache[y].pcb) continue;
+    cache[y].pcb.eachLayer(l => {
+      const p = l.feature.properties, g = l.feature.geometry.coordinates;
+      if (!pcbShown(l.feature) || p.np_lat == null) return;
+      const from = [g[1], g[0]], to = [p.np_lat, p.np_lon];
+      if (from[0] === to[0] && from[1] === to[1]) return;
+      L.polyline([from, to], {pane:"nb2", renderer:R.nb2, color:"#b45309", weight:2, opacity:0.85,
+        interactive:false}).addTo(moveLayer);
+      const brg = bearingDeg(from[0], from[1], to[0], to[1]);
+      L.marker(to, {pane:"nb2", interactive:false, icon:L.divIcon({className:"", iconSize:[14,14], iconAnchor:[7,7],
+        html:`<div style="width:0;height:0;border-left:6px solid transparent;border-right:6px solid transparent;`
+          +`border-bottom:11px solid #b45309;transform:rotate(${brg}deg);transform-origin:50% 70%"></div>`})}).addTo(moveLayer);
+    });
   }
 }
 
@@ -2948,7 +2861,7 @@ function applyFilters(){
     ["per","bnd","sb","orp"].forEach(k => c[k] && c[k].eachLayer(l => {
       if (l.setStyle) l.setStyle(hide(l.feature) ? {opacity:0, fillOpacity:0} : {opacity:1});
     }));
-    ["pcb","pcbC","ign"].forEach(k => c[k] && c[k].eachLayer(l => {
+    ["pcb","pcbC","ign","ignd"].forEach(k => c[k] && c[k].eachLayer(l => {
       const off = hide(l.feature);
       if (l.setOpacity) l.setOpacity(off ? 0 : 1);
       else if (l.setStyle) l.setStyle({opacity: off?0:1, fillOpacity: off?0:1});
@@ -2959,8 +2872,7 @@ function applyFilters(){
     a.per.eachLayer(l => { if (l.setStyle) l.setStyle(hide(l.feature) ? {opacity:0, fillOpacity:0} : {opacity:1}); });
     a.ign.eachLayer(l => { if (l.setStyle) l.setStyle(hide(l.feature) ? {opacity:0, fillOpacity:0} : {opacity:1, fillOpacity:0.95}); });
   }
-  if (errLayer || SHOW_NB2_CIRCLE || SHOW_NB2_FIRE || SHOW_NB3_CIRCLE || SHOW_NB3_FIRE
-      || SHOW_NB4_CIRCLE || SHOW_NB4_FIRE) repositionPcb();
+  if (errLayer || SHOW_MOVE) repositionPcb();
 }
 
 function gStop(){ if (gReq){ cancelAnimationFrame(gReq); gReq = null; } gLastTs = 0;

@@ -202,6 +202,8 @@ def goes_cloud_cached(year: int, events: pd.DataFrame) -> dict:
     it cannot cover (GOES_MIN_YEAR, GOES_EXCLUDE_REGIONS), same as satellite_cached's
     year gate.
     """
+    if not C.GOES_ENABLED:
+        return {}
     fire2_cols = [c for c in events.columns if c.startswith("fire2_") and (c.endswith("_lat") or c.endswith("_lon"))]
     star_cols = [c for c in ("v3_lat", "v3_lon", "v4_lat", "v4_lon") if c in events.columns]
     cols = [c for c in ("pcb_id", "datetime", "lat", "lon", "region") if c in events.columns] + fire2_cols + star_cols

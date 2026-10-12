@@ -248,6 +248,8 @@ SAT_JPEG_QUALITY   = 82
 # GOES-16/17/18/19 visible imagery (pyrocb/goes_cloud.py). Two hard coverage limits,
 # both physical, not configurable: GOES only sees the Western Hemisphere, and was not
 # operational before Dec 2017. ~252 of 484 events are within reach.
+GOES_ENABLED           = False   # 2026-10-03: GOES imagery switched off to keep the deployed map small
+                                 # (code kept; True + regen_goes_series.py bring it back)
 GOES_MIN_YEAR          = 2018
 GOES_EXCLUDE_REGIONS   = ("Northern Asia",)   # no geostationary coverage on Planetary Computer
 # The circle radius. D-69: centred on the AS-REPORTED point (not v2 - that's what's

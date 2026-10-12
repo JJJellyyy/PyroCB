@@ -271,6 +271,20 @@
     #info{width:calc(100vw - 24px)}
     #search{width:calc(100vw - 120px);left:12px;transform:none}
   }
+
+  /* minimise the pyroCb info panel: header only */
+  #info .hd .mn{position:absolute;right:36px;top:8px;width:24px;height:24px;display:flex;align-items:center;
+        justify-content:center;border-radius:6px;cursor:pointer;font-size:11px;line-height:1;opacity:.8}
+  #info .hd .mn:hover{background:rgba(255,255,255,.14);opacity:1}
+  #info.min{overflow:hidden;max-height:none}
+  #info.min .bd{display:none}
+  #info.min .hd{border-radius:var(--radius)}
+  #info .hd{padding-right:68px}
+  /* active-pyroCb badge: same colour as the ring and pixels */
+  .apcBadge{display:inline-block;transform:translate(-50%,0);color:#fff;font:700 11px/1 var(--font);padding:3px 6px;
+        border-radius:9px;border:1.5px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.45);white-space:nowrap;cursor:pointer;
+        text-shadow:0 0 2px rgba(0,0,0,.5)}
+  .apcBadge span{font-weight:500;opacity:.9;margin-left:5px}
 </style>
 </head>
 <body>
