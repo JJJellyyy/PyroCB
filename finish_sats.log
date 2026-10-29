@@ -1,0 +1,39 @@
+2018: 461,621 perimeter rows, 60,510 unique geometries; 2.22 GB -> 0.34 GB; verified geom True attr True fl True nfp True; originals deleted
+2019: 498,059 perimeter rows, 70,678 unique geometries; 2.40 GB -> 0.39 GB; verified geom True attr True fl True nfp True; originals deleted
+2020: 467,686 perimeter rows, 64,644 unique geometries; 2.22 GB -> 0.33 GB; verified geom True attr True fl True nfp True; originals deleted
+2021: 432,474 perimeter rows, 65,429 unique geometries; 2.51 GB -> 0.46 GB; verified geom True attr True fl True nfp True; originals deleted
+2022: 389,380 perimeter rows, 52,757 unique geometries; 1.74 GB -> 0.22 GB; verified geom True attr True fl True nfp True; originals deleted
+2023: 425,530 perimeter rows, 70,484 unique geometries; 3.04 GB -> 0.65 GB; verified geom True attr True fl True nfp True; originals deleted
+2025: 325,391 perimeter rows, 44,531 unique geometries; 2.23 GB -> 0.43 GB; verified geom True attr True fl True nfp True; originals deleted
+2018: 431,607 perimeter rows, 58,086 unique geometries; 2.08 GB -> 0.32 GB; verified geom True attr True fl True nfp True; originals deleted
+2019: 510,902 perimeter rows, 72,306 unique geometries; 2.46 GB -> 0.39 GB; verified geom True attr True fl True nfp True; originals deleted
+2020: 472,524 perimeter rows, 65,800 unique geometries; 2.26 GB -> 0.34 GB; verified geom True attr True fl True nfp True; originals deleted
+2021: 440,075 perimeter rows, 67,177 unique geometries; 2.58 GB -> 0.48 GB; verified geom True attr True fl True nfp True; originals deleted
+2022: 413,558 perimeter rows, 58,365 unique geometries; 1.92 GB -> 0.26 GB; verified geom True attr True fl True nfp True; originals deleted
+2023: 431,031 perimeter rows, 70,750 unique geometries; 3.06 GB -> 0.63 GB; verified geom True attr True fl True nfp True; originals deleted
+2024: 397,023 perimeter rows, 68,126 unique geometries; 2.55 GB -> 0.50 GB; verified geom True attr True fl True nfp True; originals deleted
+2025: 333,230 perimeter rows, 46,252 unique geometries; 2.25 GB -> 0.44 GB; verified geom True attr True fl True nfp True; originals deleted
+2023: 411,300 perimeter rows, 70,940 unique geometries; 2.99 GB -> 0.66 GB; verified geom True attr True fl True nfp True; originals deleted
+2024: 392,473 perimeter rows, 67,153 unique geometries; 2.51 GB -> 0.49 GB; verified geom True attr True fl True nfp True; originals deleted
+2025: 326,715 perimeter rows, 45,741 unique geometries; 2.23 GB -> 0.44 GB; verified geom True attr True fl True nfp True; originals deleted
+2018 snpp: 20,760 features, 1.9 MB
+2018 n20: 18,959 features, 1.8 MB
+2019 snpp: 23,219 features, 2.1 MB
+2019 n20: 23,536 features, 2.1 MB
+2020 snpp: 21,957 features, 2.1 MB
+2020 n20: 21,981 features, 2.1 MB
+2021 snpp: 18,347 features, 2.4 MB
+2021 n20: 18,532 features, 2.4 MB
+2022 snpp: 18,675 features, 1.6 MB
+2022 n20: 19,122 features, 1.7 MB
+2023 snpp: 16,631 features, 3.5 MB
+2023 n20: 16,926 features, 3.5 MB
+2023 n21: 15,916 features, 3.4 MB
+2024 snpp: 15,314 features, 2.1 MB
+2024 n20: 15,677 features, 2.3 MB
+2024 n21: 15,318 features, 2.2 MB
+2025 snpp: 14,145 features, 2.3 MB
+2025 n20: 14,299 features, 2.3 MB
+2025 n21: 13,956 features, 2.3 MB
+index: {'old': [2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023], 'joint': [2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025], 'snpp': [2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025], 'n20': [2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025], 'modis': [2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025], 'n21': [2023, 2024, 2025], 'new_vs_old': [2021], 'modis_vs_old': [2021], 'multisat_gain': [2021]}
+https://pyrocb-fire-66xc51jpa-jellyyys-projects.vercel.appFINISHED Thu Oct 22 20:22:50 WEST 2026

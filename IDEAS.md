@@ -87,3 +87,9 @@ a parallel track with its own packaging/its own audience question. Revisit once 
 locked.
 
 **Status:** explicitly do not start without asking.
+
+## Later: exact biomass over the 12 h growth rings (noted 2026-10-12)
+The growth-ring table (`pcbcube/rings.py`) currently APPROXIMATES ring biomass as the mean of the ring's pixels'
+`agb_2km_mgha`. For an exact zonal mean over the whole ring polygon, re-download the ESA CCI Biomass v6.0 tiles
+(~60 GB, ~1 h; `pcbcube/biomass.py` has the tile naming / URLs / previous-year map rule) and run exactextract over the
+rings, like the land cover. Decide after the exploratory analysis whether it is worth it.

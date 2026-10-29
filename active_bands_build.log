@@ -1,0 +1,23 @@
+  2013: 551 active-area bands over 13 fires (median 46/fire; 100% with pixels, 94% with perimeter growth) in 7s
+       active_bands/ab_2013.json: 1.8 MB (~0.4 MB gzipped over http)
+  2014: 971 active-area bands over 18 fires (median 63/fire; 100% with pixels, 92% with perimeter growth) in 12s
+       active_bands/ab_2014.json: 5.3 MB (~1.4 MB gzipped over http)
+  2015: 1,521 active-area bands over 42 fires (median 25/fire; 100% with pixels, 94% with perimeter growth) in 12s
+       active_bands/ab_2015.json: 5.2 MB (~1.3 MB gzipped over http)
+  2016: 713 active-area bands over 12 fires (median 45/fire; 100% with pixels, 95% with perimeter growth) in 8s
+       active_bands/ab_2016.json: 2.6 MB (~0.7 MB gzipped over http)
+  2017: 592 active-area bands over 15 fires (median 28/fire; 100% with pixels, 95% with perimeter growth) in 6s
+       active_bands/ab_2017.json: 1.8 MB (~0.4 MB gzipped over http)
+  2018: 470 active-area bands over 16 fires (median 15/fire; 100% with pixels, 93% with perimeter growth) in 7s
+       active_bands/ab_2018.json: 2.2 MB (~0.6 MB gzipped over http)
+  2019: 967 active-area bands over 20 fires (median 40/fire; 100% with pixels, 90% with perimeter growth) in 9s
+       active_bands/ab_2019.json: 3.7 MB (~0.9 MB gzipped over http)
+  2020: 480 active-area bands over 10 fires (median 36/fire; 100% with pixels, 98% with perimeter growth) in 7s
+       active_bands/ab_2020.json: 2.1 MB (~0.5 MB gzipped over http)
+  2021: 1,921 active-area bands over 40 fires (median 28/fire; 100% with pixels, 82% with perimeter growth) in 13s
+       active_bands/ab_2021.json: 7.7 MB (~2.0 MB gzipped over http)
+  2022: 514 active-area bands over 20 fires (median 18/fire; 100% with pixels, 93% with perimeter growth) in 3s
+       active_bands/ab_2022.json: 1.0 MB (~0.2 MB gzipped over http)
+  2023: 4,141 active-area bands over 69 fires (median 37/fire; 100% with pixels, 92% with perimeter growth) in 30s
+       active_bands/ab_2023.json: 22.8 MB (~5.7 MB gzipped over http)
+wrote 11 files: 56 MB raw, ~14 MB transferred

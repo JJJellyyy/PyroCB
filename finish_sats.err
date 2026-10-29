@@ -1,0 +1,17 @@
+Vercel CLI 48.0.3
+Retrieving project…
+Deploying jellyyys-projects/pyrocb-fire-map
+Uploading [--------------------] (0.0B/392MB)
+Uploading [=====---------------] (98.0MB/392MB)
+Uploading [==========----------] (196.0MB/392MB)
+Uploading [===============-----] (294.0MB/392MB)
+Uploading [====================] (392.0MB/392MB)
+Inspect: https://vercel.com/jellyyys-projects/pyrocb-fire-map/DHJ8UGnM1qo3wofxiyDmgaK6vzah [2m]
+Production: https://pyrocb-fire-66xc51jpa-jellyyys-projects.vercel.app [2m]
+Building
+Building
+Completing
+
+Common next commands:
+- `vercel inspect pyrocb-fire-66xc51jpa-jellyyys-projects.vercel.app --logs`
+- `vercel redeploy pyrocb-fire-66xc51jpa-jellyyys-projects.vercel.app`
